@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}检测结果 · Veridrop{% endblock %}
+{% block description %}Claude API 中转站检测报告:{{ report.target_model }} 总分 {{ report.total_score }}/100。10 项加密级与协议级穿透,支持下载 JPG 报告。{% endblock %}
+
+{% block content %}
+{% set perf = report.performance or {} %}
+{% set usage = perf.usage or {} %}
+{% set score = report.total_score or 0 %}
+{% set verdict = report.verdict or 'failed' %}
+{% if score >= 95 %}
+  {% set caption = '完全一致' %}{% set verdict_class = 'ok' %}
+{% elif score >= 85 %}
+  {% set caption = '优秀' %}{% set verdict_class = 'ok' %}
+{% elif verdict == 'passed' %}
+  {% set caption = '通过' %}{% set verdict_class = 'ok-dim' %}
+{% elif verdict == 'marginal' %}
+  {% set caption = '基本合格' %}{% set verdict_class = 'warn' %}
+{% else %}
+  {% set caption = '未达标' %}{% set verdict_class = 'fail' %}
+{% endif %}
+
+<section class="result-head">
+  <div>
+    <h1>检测结果</h1>
+    <p class="muted">
+      模型:<code>{{ report.target_model }}</code> · 模式 <code>{{ report.mode }}</code> ·
+      中转站 <code>{{ report.base_url }}</code>
+    </p>
+  </div>
+  <div class="result-actions">
+    <a class="btn btn-ghost" href="/r/{{ job_id }}.jpg" download="veridrop-{{ job_id }}.jpg">
+      下载 JPG
+    </a>
+    <button class="btn btn-ghost" id="share-btn" type="button">分享</button>
+  </div>
+</section>
+
+<section class="result-card">
+  <div class="result-left">
+    <div class="score-ring score-{{ verdict_class }}">
+      <div class="score-inner">
+        <div class="score-num">{{ '{:g}'.format(score) }}%</div>
+        <div class="score-caption">{{ caption }}</div>
+      </div>
+    </div>
+    <p class="muted small attribution">由 https://veridrop.org 生成</p>
+  </div>
+
+  <div class="result-right">
+    <ul class="check-list">
+      {% for row in rows %}
+      <li class="check-row check-{{ row.css }}">
+        <span class="check-icon">
+          {% if row.css == 'ok' %}
+          <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="11" fill="#10b981"/><path d="M7 12.5l3.2 3.2L17 9" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          {% elif row.css == 'warn' %}
+          <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="11" fill="#f59e0b"/><path d="M12 7v6M12 16.5v.5" stroke="white" stroke-width="2.4" stroke-linecap="round"/></svg>
+          {% elif row.css == 'fail' %}
+          <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="11" fill="#ef4444"/><path d="M8 8l8 8M16 8l-8 8" stroke="white" stroke-width="2.4" stroke-linecap="round"/></svg>
+          {% else %}
+          <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="10" fill="none" stroke="#9ca3af" stroke-width="2"/></svg>
+          {% endif %}
+        </span>
+        <span class="check-label">{{ row.label }}</span>
+        <span class="check-status">{{ row.label_short }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+
+<section class="metrics-row metrics-row-5">
+  <div class="metric{% if perf.ttft_ms and perf.ttft_ms > 2000 %} metric-warn{% endif %}">
+    <div class="metric-label">首 TOKEN</div>
+    <div class="metric-value" title="Time to first token,从发出请求到收到第一个真实 token 的时间(取所有流式请求的最小值)">
+      {% if perf.ttft_ms is not none %}{{ '{:,}'.format(perf.ttft_ms) }}ms{% else %}—{% endif %}
+    </div>
+  </div>
+  <div class="metric{% if (perf.total_latency_ms or 0) > 30000 %} metric-warn{% endif %}">
+    <div class="metric-label">总耗时</div>
+    <div class="metric-value" title="整批检测的钟表时间(并行运行,等于最慢 detector 的耗时)">
+      {{ '{:,}'.format(perf.total_latency_ms or 0) }}ms
+    </div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">吞吐 (T/S)</div>
+    <div class="metric-value">
+      {% set out_t = (usage.output_tokens or 0) %}
+      {% set lat = (perf.total_latency_ms or 0) %}
+      {% if out_t and lat %}
+        {{ '%.1f' | format(out_t * 1000.0 / lat) }}
+      {% else %}—{% endif %}
+    </div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">输入 TOKENS</div>
+    <div class="metric-value">{{ '{:,}'.format(usage.input_tokens or 0) }}</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">输出 TOKENS</div>
+    <div class="metric-value">{{ '{:,}'.format(usage.output_tokens or 0) }}</div>
+  </div>
+</section>
+
+{% if report.detected_non_anthropic_brands %}
+<section class="card alert-card">
+  <strong>⚠ 检测到非 Anthropic 后端品牌:</strong>
+  {{ report.detected_non_anthropic_brands | join(', ') }}
+</section>
+{% endif %}
+
+<section class="card details-card">
+  <details>
+    <summary>10 项检测各自检查什么?</summary>
+    <dl class="def-list">
+      <dt>身份一致性 (Identity)</dt>
+      <dd>询问模型自报身份,响应必须包含 "Claude" 与 "Anthropic",且不能自称是其他品牌(如 Kiro、AWS Q 等)。</dd>
+      <dt>行为签名验证 (Behavioral)</dt>
+      <dd>3 道行为指纹题(markdown 风格、列表偏好、拒绝语气),正版 Claude 有特征鲜明的回答模式。</dd>
+      <dt>思维签名验证 (Thinking) ⭐</dt>
+      <dd>核心检测:Claude thinking 块返回的加密 <code>signature</code> 字节,任何中转站都无法伪造。</dd>
+      <dt>模型一致性 (Consistency)</dt>
+      <dd>验证 <code>response.model</code> 与请求一致,且多次调用输出长度稳定(变异系数 CV)。</dd>
+      <dt>知识准确度 (Knowledge)</dt>
+      <dd>5 道关于 Anthropic 公司的常识题(CEO、HQ、Constitutional AI 等),错答多则说明背后不是真 Claude。</dd>
+      <dt>PDF 文档识别</dt>
+      <dd>提交一份 base64 PDF + magic 字符串,检查模型能否正确提取——剥离 multimodal 的中转站会失败。</dd>
+      <dt>结构化输出 (Tool Use)</dt>
+      <dd>真实 tool_use 调用,验证 <code>toolu_</code> ID 前缀、JSON schema 匹配、stop_reason 等 5 项子项。</dd>
+      <dt>协议规范性 (Protocol)</dt>
+      <dd>SSE 事件序列、content block 类型必须符合 Anthropic 官方规范(被动检测,不发额外请求)。</dd>
+      <dt>响应完整性 (Integrity)</dt>
+      <dd>同一 prompt 流式与非流式调用必须返回一致的文本、<code>input_tokens</code>、<code>stop_reason</code>。</dd>
+      <dt>消息标识规范 (Message ID)</dt>
+      <dd>消息 <code>id</code> 必须以 <code>msg_</code> 开头、tool 块以 <code>toolu_</code> 开头。UUID 或硬编码 <code>tool_1</code> 是典型造假特征。</dd>
+    </dl>
+  </details>
+</section>
+
+<script>
+document.getElementById('share-btn').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(location.href);
+    const btn = document.getElementById('share-btn');
+    const orig = btn.textContent;
+    btn.textContent = '已复制!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  } catch (e) {}
+});
+</script>
+{% endblock %}

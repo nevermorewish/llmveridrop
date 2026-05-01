@@ -1,0 +1,275 @@
+"""Pure-function unit tests for M3 active detectors.
+
+Covers grading / parsing / matching helpers that don't need a live API.
+End-to-end behavior is verified via the integration `detect` run.
+"""
+
+from __future__ import annotations
+
+from relay_detector.config import lookup_model, models_match
+from relay_detector.detectors.behavioral_signature import _evaluate
+from relay_detector.detectors.knowledge import (
+    _applies,
+    _grade,
+    _parse_numbered_answers,
+)
+from relay_detector.detectors.thinking_signature import ThinkingSignatureDetector
+
+
+# --- config helpers --------------------------------------------------------
+
+
+def test_lookup_model_alias():
+    info = lookup_model("claude-opus-4-7")
+    assert info is not None
+    assert info.alias == "claude-opus-4-7"
+    assert info.supports_adaptive_thinking is True
+    assert info.supports_extended_thinking is False
+
+
+def test_lookup_model_snapshot():
+    info = lookup_model("claude-haiku-4-5-20251001")
+    assert info is not None
+    assert info.alias == "claude-haiku-4-5"
+
+
+def test_lookup_model_unknown_returns_none():
+    assert lookup_model("gpt-4o") is None
+
+
+def test_models_match_bidirectional_prefix():
+    # alias request, snapshot response
+    assert models_match("claude-haiku-4-5", "claude-haiku-4-5-20251001") is True
+    # snapshot request, alias response
+    assert models_match("claude-haiku-4-5-20251001", "claude-haiku-4-5") is True
+    # exact match
+    assert models_match("claude-opus-4-7", "claude-opus-4-7") is True
+    # mismatch
+    assert models_match("claude-opus-4-7", "claude-sonnet-4-6") is False
+    assert models_match("", "claude-opus-4-7") is False
+
+
+# --- Knowledge: grading & parsing -----------------------------------------
+
+
+def test_grade_global_expected_keywords_all_must_match():
+    q = {
+        "expected_keywords": ["dario", "amodei"],
+        "anti_keywords": ["i don't know"],
+    }
+    assert _grade("Dario Amodei is the CEO.", q, "claude-opus-4-7") is True
+    assert _grade("It's Dario.", q, "claude-opus-4-7") is False  # missing 'amodei'
+    assert _grade("I don't know who.", q, "claude-opus-4-7") is False
+
+
+def test_grade_expected_keyword_match_any():
+    q = {
+        "expected_keywords": ["principles", "values", "harmful"],
+        "expected_keyword_match": "any",
+    }
+    assert _grade("It uses guiding principles.", q, "m") is True
+    assert _grade("It avoids harmful outputs.", q, "m") is True
+    assert _grade("Random unrelated text.", q, "m") is False
+
+
+def test_grade_expected_by_model_overrides_global():
+    q = {
+        "expected_keywords": ["fallback"],
+        "expected_by_model": {
+            "claude-opus-4-7": ["jan", "2026"],
+            "claude-sonnet-4-6": ["aug", "2025"],
+        },
+    }
+    # Opus 4.7 → must contain jan AND 2026
+    assert _grade("January 2026", q, "claude-opus-4-7") is True
+    assert _grade("August 2025", q, "claude-opus-4-7") is False
+    # Sonnet 4.6 → must contain aug AND 2025
+    assert _grade("August 2025", q, "claude-sonnet-4-6") is True
+    # Model not in map → fallback to global
+    assert _grade("fallback word", q, "claude-haiku-4-5") is True
+
+
+def test_grade_anti_keyword_overrides_match():
+    q = {
+        "expected_keywords": ["dario"],
+        "anti_keywords": ["unknown"],
+    }
+    # Even if expected hits, anti_keyword wins
+    assert _grade("Dario Amodei, but actually unknown.", q, "m") is False
+
+
+def test_parse_numbered_answers_handles_various_formats():
+    text = (
+        "1. Dario Amodei\n"
+        "2) Daniela Amodei\n"
+        "3: Some thing\n"
+        "  4 - Trailing\n"
+        "irrelevant line\n"
+        "5. last\n"
+    )
+    parsed = _parse_numbered_answers(text, n=5)
+    assert parsed[1] == "Dario Amodei"
+    assert parsed[2] == "Daniela Amodei"
+    assert parsed[3] == "Some thing"
+    assert parsed[4] == "Trailing"
+    assert parsed[5] == "last"
+
+
+def test_parse_numbered_answers_ignores_out_of_range():
+    parsed = _parse_numbered_answers("7. way too high\n1. valid\n", n=3)
+    assert parsed == {1: "valid"}
+
+
+def test_applies_with_allowlist():
+    q = {"applicable_models": ["claude-opus-4-7", "claude-sonnet-4-6"]}
+    assert _applies(q, "claude-opus-4-7") is True
+    assert _applies(q, "claude-haiku-4-5") is False
+    # snapshot prefix matching works through models_match-like logic
+    assert _applies(q, "claude-opus-4-7-20260101") is True
+
+
+def test_applies_with_no_allowlist_means_all():
+    assert _applies({}, "any-model") is True
+
+
+# --- Behavioral: regex evaluation -----------------------------------------
+
+
+def test_behavioral_evaluate_expected_all():
+    sig = {
+        "expected_patterns": ["claude", "anthropic"],
+        "expected_match": "all",
+        "unexpected_patterns": [],
+    }
+    assert _evaluate("I am Claude, made by Anthropic.", sig) is True
+    assert _evaluate("I am Claude.", sig) is False  # missing anthropic
+
+
+def test_behavioral_evaluate_expected_any():
+    sig = {
+        "expected_patterns": ["typically", "generally", "however"],
+        "expected_match": "any",
+    }
+    assert _evaluate("This typically happens.", sig) is True
+    assert _evaluate("Random other text.", sig) is False
+
+
+def test_behavioral_evaluate_unexpected_blocks_pass():
+    sig = {
+        "expected_patterns": ["claude"],
+        "unexpected_patterns": ["i am gpt-4"],
+    }
+    assert _evaluate("I am Claude.", sig) is True
+    # Even though expected matches, unexpected disqualifies
+    assert _evaluate("I am Claude. Wait, actually I am GPT-4.", sig) is False
+
+
+def test_behavioral_evaluate_markdown_pattern():
+    sig = {
+        "expected_patterns": [r"\*\*[A-Za-z][A-Za-z\s]{1,40}\*\*"],
+        "unexpected_patterns": [r"__[A-Za-z][A-Za-z\s]{1,40}__"],
+    }
+    assert _evaluate("A **hash table** is...", sig) is True
+    assert _evaluate("A __hash table__ is...", sig) is False
+    assert _evaluate("Just plain text.", sig) is False
+
+
+# --- ThinkingSignatureDetector.applies_to ---------------------------------
+
+
+def test_thinking_applies_to_supported_models():
+    d = ThinkingSignatureDetector()
+    assert d.applies_to("claude-opus-4-7") is True       # adaptive only
+    assert d.applies_to("claude-sonnet-4-6") is True     # both
+    assert d.applies_to("claude-haiku-4-5") is True      # extended only
+    assert d.applies_to("claude-opus-4-6") is True       # legacy, still extended
+    assert d.applies_to("claude-haiku-4-5-20251001") is True  # snapshot resolves
+
+
+def test_identity_brand_patterns_detect_amazon_q():
+    from relay_detector.detectors.identity import NON_ANTHROPIC_BRAND_PATTERNS
+    import re
+
+    text = (
+        "I'm Amazon Q, an AI assistant built by Amazon Web Services (AWS). "
+        "I'm designed to help you with cloud infrastructure through the q chat CLI."
+    ).lower()
+    hits = []
+    for pattern, label in NON_ANTHROPIC_BRAND_PATTERNS:
+        if re.search(pattern, text) and label not in hits:
+            hits.append(label)
+    assert "Amazon Q" in hits
+    assert "AWS" in hits
+
+
+def test_identity_brand_patterns_no_false_positive_on_pure_claude_response():
+    from relay_detector.detectors.identity import NON_ANTHROPIC_BRAND_PATTERNS
+    import re
+
+    text = (
+        "I'm Claude, an AI assistant developed by Anthropic. "
+        "I don't have access to my exact model version."
+    ).lower()
+    hits = [
+        label for pattern, label in NON_ANTHROPIC_BRAND_PATTERNS
+        if re.search(pattern, text)
+    ]
+    assert hits == [], f"unexpected brand hits in pure Claude response: {hits}"
+
+
+def test_identity_brand_patterns_detect_chatgpt():
+    from relay_detector.detectors.identity import NON_ANTHROPIC_BRAND_PATTERNS
+    import re
+
+    text = "I'm ChatGPT, a large language model trained by OpenAI.".lower()
+    hits = [
+        label for pattern, label in NON_ANTHROPIC_BRAND_PATTERNS
+        if re.search(pattern, text)
+    ]
+    assert "ChatGPT" in hits
+    assert "OpenAI" in hits
+
+
+def test_thinking_skip_unknown_model():
+    d = ThinkingSignatureDetector()
+    assert d.applies_to("gpt-4o") is False
+    assert d.applies_to("some-random-model") is False
+
+
+# --- PDFDetector data plumbing --------------------------------------------
+
+
+def test_pdf_test_document_is_well_formed():
+    """The bundled test PDF must load, look like a PDF, and be non-trivial.
+
+    We can't grep for MAGIC in raw bytes — reportlab encodes content streams
+    in ASCII85 by default. Whether Claude's vision can extract it is an e2e
+    concern, not a unit-test concern.
+    """
+    from relay_detector.detectors.pdf import _load_pdf_b64
+    import base64
+
+    b64 = _load_pdf_b64()
+    assert b64, "test_document.pdf failed to load"
+    raw = base64.standard_b64decode(b64)
+    assert raw.startswith(b"%PDF-"), "not a valid PDF header"
+    assert b"%%EOF" in raw[-32:], "PDF should end with %%EOF"
+    assert len(raw) > 500, f"PDF unexpectedly small ({len(raw)} bytes)"
+
+
+# --- StructuredOutputDetector tool definition sanity --------------------
+
+
+def test_structured_output_tool_def_is_well_formed():
+    from relay_detector.detectors.structured_output import (
+        TOOL_DEF, TOOL_NAME, VALID_CALLERS,
+    )
+
+    assert TOOL_DEF["name"] == TOOL_NAME
+    schema = TOOL_DEF["input_schema"]
+    assert schema["type"] == "object"
+    assert set(schema["required"]) == {"city", "unit"}
+    assert schema["properties"]["unit"]["enum"] == ["celsius", "fahrenheit"]
+    # Match official caller enum from DESIGN §3.7
+    assert "direct" in VALID_CALLERS
+    assert all(c.startswith(("direct", "code_execution_")) for c in VALID_CALLERS)
