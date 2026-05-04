@@ -10,6 +10,7 @@ SEO 价值:用户搜「XX 中转站怎么样」时,leaderboard 页面包含该�
 from __future__ import annotations
 
 import json
+import re
 import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -33,6 +34,19 @@ VERDICT_LABELS = {"passed": "通过", "marginal": "存在风险", "failed": "未
 # Still surface it in the list (good for SEO long-tail), but mark it as
 # "single sample" so users know not to over-interpret.
 _MIN_RANKED_SAMPLES = 2
+
+# Strict allow-list for path parameter — accept only what _extract_domain
+# could legitimately produce from a real base_url. Rejects anything with
+# slashes, query strings, uppercase, unicode, leading/trailing dots/hyphens.
+# Defends path traversal, header injection, and template XSS via stray chars.
+_DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{1,251}[a-z0-9])?$")
+
+
+def is_valid_domain(s: str) -> bool:
+    """Whether s is safe to accept as a path parameter for /leaderboard/{domain}."""
+    if not s or len(s) > 253 or "." not in s:
+        return False
+    return bool(_DOMAIN_RE.match(s))
 
 
 @dataclass
@@ -203,3 +217,115 @@ def aggregate() -> tuple[list[RelayStats], dict[str, int]]:
         "ranked_relays": sum(1 for r in relays if r.is_ranked),
     }
     return relays, summary
+
+
+@dataclass
+class JobEntry:
+    """One row in a per-domain detail page's history table."""
+    job_id: str
+    protocol: str
+    model: str
+    score: float
+    verdict: str
+    timestamp: datetime | None
+    failed_count: int
+
+    @property
+    def date_str(self) -> str:
+        return self.timestamp.strftime("%Y-%m-%d") if self.timestamp else ""
+
+    @property
+    def badge_class(self) -> str:
+        if self.score >= 85: return "ok"
+        if self.score >= 70: return "good"
+        if self.score >= 50: return "warn"
+        return "fail"
+
+
+def aggregate_one(domain: str) -> tuple[RelayStats, list[JobEntry]] | None:
+    """Build the per-domain detail view: stats + full job history.
+
+    Returns None if no reports exist for this domain. Otherwise returns
+    (stats, jobs) where jobs is sorted newest-first.
+
+    This re-scans all report files filtered to the requested domain. At our
+    scale (<10k reports) the cost is negligible; at 100k+ we'd add an index.
+    """
+    domain = domain.strip().lower()
+    if not is_valid_domain(domain):
+        return None
+
+    relay = RelayStats(domain=domain)
+    history: list[JobEntry] = []
+
+    for dir_path in REPORT_DIRS:
+        if not dir_path.is_dir():
+            continue
+        for json_path in dir_path.glob("*.json"):
+            report = _load_report(json_path)
+            if not report:
+                continue
+            if _extract_domain(report.get("base_url", "")) != domain:
+                continue
+
+            protocol = str(report.get("protocol") or "anthropic")
+            score = float(report.get("total_score") or 0)
+            verdict = str(report.get("verdict") or "failed")
+            ts = _parse_timestamp(report.get("timestamp"))
+            if ts is None:
+                try:
+                    ts = datetime.fromtimestamp(json_path.stat().st_mtime, tz=timezone.utc)
+                except OSError:
+                    pass
+            job_id = json_path.stem
+            model = str(report.get("target_model") or "")
+
+            results = report.get("results") or []
+            failed_count = sum(
+                1 for r in results
+                if isinstance(r, dict) and r.get("status") == "fail"
+            )
+
+            ps = relay.by_protocol.setdefault(protocol, ProtocolStats(protocol=protocol))
+            ps.count += 1
+            ps.scores.append(score)
+            for r in results:
+                if isinstance(r, dict) and r.get("status") == "fail":
+                    name = r.get("name")
+                    if isinstance(name, str):
+                        ps.failed_detectors[name] += 1
+            if ts and (ps.last_checked is None or ts > ps.last_checked):
+                ps.last_checked = ts
+                ps.last_job_id = job_id
+                ps.last_score = score
+                ps.last_verdict = verdict
+            elif ps.last_checked is None:
+                ps.last_job_id = job_id
+                ps.last_score = score
+                ps.last_verdict = verdict
+
+            history.append(JobEntry(
+                job_id=job_id,
+                protocol=protocol,
+                model=model,
+                score=score,
+                verdict=verdict,
+                timestamp=ts,
+                failed_count=failed_count,
+            ))
+
+    if not history:
+        return None
+
+    # Newest first; tie-break on job_id for deterministic ordering.
+    history.sort(
+        key=lambda j: (j.timestamp.timestamp() if j.timestamp else 0, j.job_id),
+        reverse=True,
+    )
+    return relay, history
+
+
+def all_domains() -> list[str]:
+    """Every domain that has at least one report — used to populate sitemap."""
+    relays, _ = aggregate()
+    return [r.domain for r in relays if r.domain]

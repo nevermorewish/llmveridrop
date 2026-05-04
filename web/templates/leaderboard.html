@@ -31,7 +31,7 @@
       "@type": "ListItem",
       "position": {{ loop.index }},
       "name": "{{ r.domain }}",
-      "url": "https://veridrop.org/leaderboard#{{ r.domain }}"
+      "url": "https://veridrop.org/leaderboard/{{ r.domain }}"
     }{% if not loop.last %},{% endif %}
     {%- endfor %}
   ]
@@ -65,7 +65,9 @@
       {% else %}<span class="lb-rank-num">{{ loop.index }}</span>{% endif %}
     </div>
     <div class="lb-main">
-      <h2 class="lb-domain">{{ r.domain }}</h2>
+      <h2 class="lb-domain">
+        <a href="/leaderboard/{{ r.domain }}" title="查看 {{ r.domain }} 全部检测历史">{{ r.domain }}</a>
+      </h2>
       <p class="lb-meta">
         <strong>{{ r.total_count }}</strong> 次检测 ·
         <strong>{{ r.protocols_label }}</strong>
@@ -75,6 +77,7 @@
         {% if not r.is_ranked %}
           · <span class="lb-badge-info">单次样本,仅供参考</span>
         {% endif %}
+        · <a class="lb-detail-link" href="/leaderboard/{{ r.domain }}">查看完整历史 →</a>
       </p>
       <div class="lb-protocols">
         {% for proto, ps in r.by_protocol.items() %}

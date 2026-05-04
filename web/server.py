@@ -154,6 +154,44 @@ async def leaderboard_page(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/leaderboard/{domain}", response_class=HTMLResponse)
+async def leaderboard_domain_page(request: Request, domain: str) -> HTMLResponse:
+    """每域名独立详情页 — SEO 长尾关键的杠杆。
+
+    用户搜「{domain} 中转站怎么样」/「{domain} 真假」/「{domain} 评测」时,
+    Google 直接命中此页。包含该域名的所有历史检测、协议覆盖、最常失败的
+    detector,以及指向每份具体 /r/{job_id} 报告的链接。
+    """
+    if not leaderboard.is_valid_domain(domain):
+        raise HTTPException(status_code=404, detail="invalid domain")
+    result = leaderboard.aggregate_one(domain)
+    if result is None:
+        raise HTTPException(status_code=404, detail="no reports for this domain")
+    relay, history = result
+
+    # Top 5 most-failed detectors across all protocols — the headline issues.
+    failed_summary: list[tuple[str, int]] = []
+    seen_names: set[str] = set()
+    for ps in relay.by_protocol.values():
+        for name, cnt in ps.failed_detectors.most_common(5):
+            if name not in seen_names:
+                failed_summary.append((name, cnt))
+                seen_names.add(name)
+    failed_summary.sort(key=lambda x: x[1], reverse=True)
+
+    return templates.TemplateResponse(
+        request,
+        "leaderboard_detail.html",
+        {
+            "relay": relay,
+            "history": history,
+            "failed_summary": failed_summary[:8],
+            "protocol_labels": leaderboard.PROTOCOL_LABELS,
+            "verdict_labels": leaderboard.VERDICT_LABELS,
+        },
+    )
+
+
 @app.get("/faq", response_class=HTMLResponse)
 async def faq_index(request: Request) -> HTMLResponse:
     """Standalone FAQ page — single source of truth in faq_data.py drives
@@ -629,6 +667,18 @@ async def sitemap_xml() -> Response:
                 f"<changefreq>monthly</changefreq>"
                 f"<priority>0.6</priority></url>"
             )
+
+    # Per-domain detail pages — primary long-tail SEO surface. Each one
+    # answers "what is {domain} relay like" with aggregated history.
+    for domain in leaderboard.all_domains():
+        if not leaderboard.is_valid_domain(domain):
+            continue
+        lines.append(
+            f"  <url><loc>https://veridrop.org/leaderboard/{domain}</loc>"
+            f"<changefreq>weekly</changefreq>"
+            f"<priority>0.75</priority></url>"
+        )
+
     lines.append("</urlset>\n")
     return Response(
         content="\n".join(lines),
