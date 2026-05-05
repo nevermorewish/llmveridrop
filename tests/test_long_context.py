@@ -12,6 +12,7 @@ from relay_detector.core.long_context import (
     estimate_cost_usd,
     evaluate_recalls,
     make_needles,
+    model_context_limit,
 )
 from relay_detector.core.models import ExecutionConfig, Mode
 from relay_detector.protocols.openai.detectors.long_context import (
@@ -55,10 +56,10 @@ def test_needles_at_distinct_positions():
 
 def test_assemble_haystack_approximates_target_size():
     needles = make_needles("test")
-    # Aim for 1000 tokens (~4000 chars). Tolerance ±20% — exact char counts
-    # depend on which template lengths the RNG picks.
+    # Aim for 1000 tokens × 6 chars/token = ~6000 chars. Live measured 6.05
+    # against gpt-4o-mini at three tiers, so tolerance ±15%.
     text = assemble_haystack(1000, needles, "test")
-    assert 3200 <= len(text) <= 4800, f"got {len(text)} chars, expected ~4000"
+    assert 5100 <= len(text) <= 6900, f"got {len(text)} chars, expected ~6000"
 
 
 def test_assemble_haystack_contains_all_needles():
@@ -143,6 +144,30 @@ def test_estimate_cost_handles_snapshot_suffix():
     assert 0.014 <= cost <= 0.016
 
 
+# ---------- Model context limit ----------
+
+
+def test_model_context_limit_known_models():
+    assert model_context_limit("gpt-4o-mini") == 128_000
+    assert model_context_limit("gpt-4.1") == 1_000_000
+    assert model_context_limit("claude-haiku-4-5") == 200_000
+    assert model_context_limit("claude-opus-4-7") == 1_000_000
+    assert model_context_limit("gemini-2.5-pro") == 2_000_000
+
+
+def test_model_context_limit_snapshot_suffix():
+    # Snapshot IDs like gpt-4o-mini-2024-07-18 should resolve via prefix.
+    assert model_context_limit("gpt-4o-mini-2024-07-18") == 128_000
+    assert model_context_limit("claude-haiku-4-5-20251001") == 200_000
+
+
+def test_model_context_limit_unknown_falls_back_conservatively():
+    # Unknown model defaults to 128k — better to skip a probe tier than
+    # send 200k to a 16k model and flag the natural error as truncation.
+    assert model_context_limit("unknown-model-xyz") == 128_000
+    assert model_context_limit("") == 128_000
+
+
 # ---------- Detector behaviour ----------
 
 
@@ -209,7 +234,8 @@ async def test_long_context_passes_when_all_needles_recalled():
         return ({}, _build_resp("\n".join(ids[:3])), {}, 0)
 
     client.chat_completions_create = smart_response
-    result = await det.run(client, "gpt-4o-mini")
+    # gpt-4.1-mini has 1M context, so all three tiers probe (no skip).
+    result = await det.run(client, "gpt-4.1-mini")
     assert result.status == "pass"
     assert result.score == 100.0
     assert len(result.details["tiers_tested"]) == 3
@@ -300,7 +326,54 @@ async def test_long_context_estimated_cost_reported():
         return ({}, _build_resp("\n".join(ids[:3])), {}, 0)
 
     client.chat_completions_create = smart_response
-    result = await det.run(client, "gpt-4o-mini")
-    # gpt-4o-mini @ $0.15/M, total tokens 32k+100k+200k = 332k → ~$0.05
+    # gpt-4.1-mini @ $0.40/M, all 3 tiers probed (1M context limit), 332k → ~$0.13
+    result = await det.run(client, "gpt-4.1-mini")
     cost = result.details["estimated_cost_usd"]
-    assert 0.04 <= cost <= 0.06
+    assert 0.12 <= cost <= 0.14
+
+
+@pytest.mark.asyncio
+async def test_long_context_skips_tier_above_model_limit():
+    """gpt-4o-mini has 128k context — the 200k tier must be skipped, not failed.
+    Otherwise a non-fraudulent OpenAI key would always show false-positive
+    truncation, since the model itself rejects 200k input."""
+    det = LongContextDetector()
+    det.config = ExecutionConfig.for_mode(Mode.FULL, include_long_context=True)
+    client = _MockClient()
+
+    async def smart_response(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        ids = ANSWER_RE.findall(prompt.upper())
+        return ({}, _build_resp("\n".join(ids[:3])), {}, 0)
+
+    client.chat_completions_create = smart_response
+    result = await det.run(client, "gpt-4o-mini")  # 128k context
+
+    # 32k and 100k probed → pass. 200k skipped (over 128k * 0.95 budget).
+    tiers = result.details["tiers_tested"]
+    assert len(tiers) == 3
+    assert tiers[0]["status"] == "pass"
+    assert tiers[1]["status"] == "pass"
+    assert tiers[2]["status"] == "skip"
+    assert "上限" in tiers[2]["skip_reason"]
+    # Aggregate: status pass (only probed tiers count for verdict)
+    assert result.status == "pass"
+    assert result.score == 100.0
+    # Summary mentions the skip
+    assert "更高档因模型自身" in result.details["summary"]
+
+
+@pytest.mark.asyncio
+async def test_long_context_skip_overall_when_model_too_small():
+    """gpt-3.5-turbo has 16k context — every probe tier is over the limit.
+    Detector returns overall skip rather than misleading fail."""
+    det = LongContextDetector()
+    det.config = ExecutionConfig.for_mode(Mode.FULL, include_long_context=True)
+    client = _MockClient()
+
+    # No client calls expected — every tier should skip without probing.
+    result = await det.run(client, "gpt-3.5-turbo")
+    assert result.status == "skip"
+    assert client.calls == []  # spent zero
+    tiers = result.details["tiers_tested"]
+    assert all(t["status"] == "skip" for t in tiers)

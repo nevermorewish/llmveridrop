@@ -26,11 +26,61 @@ import re
 from dataclasses import dataclass
 
 
-# Approximate chars-per-token for English mixed with numbers and punctuation.
-# tiktoken's cl100k tokenizer averages ~3.8 for plain English; we use 4.0 to
-# slightly overshoot the target, which is the safe direction (better to send
-# more than the tier and still detect truncation than fall short).
-_CHARS_PER_TOKEN = 4.0
+# Empirical chars-per-token for our synthetic templated filler. cl100k
+# averages ~3.8 on plain English prose, but our templates use longer
+# proper-noun-heavy sentences ("Cardinal Robotics", "supply chain
+# resilience") which compress to fewer tokens per char. Live measured
+# 6.05 ch/tok at all three tiers against gpt-4o-mini official API.
+# Using 6.0 gets us within ~1% of the target token count.
+_CHARS_PER_TOKEN = 6.0
+
+
+# Advertised context window per model — tiers above the model's own limit
+# would generate misleading "fail" results (the failure is the model, not
+# the relay), so the detector skips them. Conservative defaults; new
+# models added as they ship. Keys are alias prefixes so snapshot suffixes
+# (e.g. gpt-4o-mini-2024-07-18) match.
+_MODEL_CONTEXT_LIMITS = {
+    # OpenAI
+    "gpt-4o-mini":    128_000,
+    "gpt-4o":         128_000,
+    "gpt-4.1-mini":  1_000_000,
+    "gpt-4.1":       1_000_000,
+    "gpt-5-mini":     256_000,
+    "gpt-5":          256_000,
+    "gpt-3.5-turbo":   16_385,
+    "o1-mini":        128_000,
+    "o1":             200_000,
+    "o3":             200_000,
+    "o3-mini":        128_000,
+    # Anthropic — Opus 4.7 supports 1M with the context-1m beta header
+    "claude-haiku-4-5":  200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-opus-4-7":  1_000_000,
+    "claude-opus-4-6":   200_000,
+    # Gemini
+    "gemini-2.5-flash": 1_000_000,
+    "gemini-2.5-pro":   2_000_000,
+    "gemini-1.5-pro":   2_000_000,
+    "gemini-1.5-flash": 1_000_000,
+}
+
+
+def model_context_limit(model: str) -> int:
+    """Advertised maximum input context for known models, in tokens.
+
+    Returns 128_000 as a conservative default for unknown models so we
+    don't accidentally probe a 16k model with a 200k haystack and flag
+    the natural 400 error as a relay truncation.
+    """
+    if not model:
+        return 128_000
+    if model in _MODEL_CONTEXT_LIMITS:
+        return _MODEL_CONTEXT_LIMITS[model]
+    for prefix, limit in _MODEL_CONTEXT_LIMITS.items():
+        if model.startswith(prefix):
+            return limit
+    return 128_000
 
 
 @dataclass

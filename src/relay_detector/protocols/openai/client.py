@@ -168,6 +168,11 @@ class ThrottledOpenAIClient:
         self.total_usage = UsageMetrics()
         self._ttft_samples_ms: list[int] = []
 
+    @property
+    def base_url(self) -> str:
+        """Pass-through so detectors treat this wrapper as the underlying client."""
+        return self._base.base_url
+
     async def _wait_for_backoff(self) -> None:
         while True:
             wait = self._backoff_until - time.monotonic()

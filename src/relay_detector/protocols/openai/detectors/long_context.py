@@ -27,6 +27,7 @@ from ....core.long_context import (
     estimate_cost_usd,
     evaluate_recalls,
     make_needles,
+    model_context_limit,
 )
 from ....core.models import DetectorResult
 from .base import ActiveDetector
@@ -69,7 +70,28 @@ class LongContextDetector(ActiveDetector):
         truncation_at: int | None = None
         reached_tier: int | None = None
 
+        # Don't probe beyond the model's own advertised limit — those
+        # tiers would generate 400 errors that would be misclassified as
+        # relay truncation. The model itself is the limiter, not the relay.
+        # Reserve 5% headroom for the question + reasoning tokens.
+        ctx_limit = model_context_limit(model)
+        budget = int(ctx_limit * 0.95)
+
         for target_tokens in TIERS_TOKENS:
+            if target_tokens > budget:
+                tier_results.append({
+                    "target_tokens": target_tokens,
+                    "needles_total": 3,
+                    "needles_found": 0,
+                    "status": "skip",
+                    "skip_reason": (
+                        f"模型 {model} 上限为 {ctx_limit} tokens,跳过此档"
+                    ),
+                    "estimated_cost_usd": 0.0,
+                    "prompt_tokens_reported": None,
+                })
+                continue
+
             tier_result = await self._probe_tier(
                 client, model, target_tokens, seed
             )
@@ -180,56 +202,69 @@ class LongContextDetector(ActiveDetector):
 def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
     """Combine per-tier outcomes into one score / status / human summary.
 
-    Score philosophy:
-      - Each tier worth equal portion of the score (33% each)
-      - pass=100, partial=66, fail=0 within a tier
-      - Skipped tiers (because earlier failed) are NOT penalized — they
-        don't subtract from score. We only penalize what we observed.
+    Three kinds of tier entries can appear in tier_results:
+      - probed (pass/partial/fail): tested with a real request
+      - skip: not probed because target exceeds model's own context window
+      - (loop break): tiers after a fail aren't in tier_results at all
 
-    Status:
-      - All pass → pass
-      - Any fail → fail (truncation evidence is binary critical)
-      - Any partial without fail → fail (don't be soft; partial recall
-        at advertised limits is itself a problem worth flagging)
+    Scoring drops skip entries — they reflect a model limit, not a relay
+    flaw, so penalizing for them would conflate two different problems.
+    Tiers untested because of an earlier failure are also dropped from the
+    denominator: the failed tier's 0% already represents the verdict, and
+    averaging two 0% tiers would just halve the score for the same evidence.
     """
     if not tier_results:
         return 0.0, "error", "未跑任何 tier"
 
+    probed = [t for t in tier_results if t["status"] != "skip"]
+    if not probed:
+        # Model's own context limit is below all our probe tiers — we
+        # couldn't test anything. Caller will have already reported this
+        # via the skip tier entries.
+        return 0.0, "skip", "模型自身 context 上限低于检测最低档 (32k),跳过"
+
     per_tier_pct = []
-    for t in tier_results:
+    for t in probed:
         if t["status"] == "pass":
             per_tier_pct.append(100.0)
         elif t["status"] == "partial":
             per_tier_pct.append(66.0)
-        else:
+        else:  # fail
             per_tier_pct.append(0.0)
-
-    # Untested tiers (because we stopped early) get 0 pct — explicitly
-    # acknowledging "we couldn't verify higher tiers because lower failed".
-    while len(per_tier_pct) < len(TIERS_TOKENS):
-        per_tier_pct.append(0.0)
     score = sum(per_tier_pct) / len(per_tier_pct)
 
-    # Status decision
-    has_fail = any(t["status"] == "fail" for t in tier_results)
-    has_partial = any(t["status"] == "partial" for t in tier_results)
+    has_fail = any(t["status"] == "fail" for t in probed)
+    has_partial = any(t["status"] == "partial" for t in probed)
+    skip_count = len(tier_results) - len(probed)
 
-    if has_fail:
-        last = tier_results[-1]
-        status = "fail"
-        summary = (
-            f"{last['target_tokens'] // 1000}k tokens 处召回失败 "
-            f"({last['needles_found']}/{last['needles_total']} needles)"
-            "—— 中转站很可能在此规模截断或路由到小窗口模型"
+    if has_fail or has_partial:
+        bad = next(
+            t for t in probed if t["status"] in ("fail", "partial")
         )
-    elif has_partial:
-        status = "fail"  # partial at advertised limit IS a problem
-        summary = "在某档存在 needle 召回不全,可能存在轻度截断或上下文压缩"
+        status = "fail"
+        if has_fail:
+            summary = (
+                f"{bad['target_tokens'] // 1000}k tokens 处召回失败 "
+                f"({bad['needles_found']}/{bad['needles_total']} needles) "
+                "—— 中转站很可能在此规模截断或路由到小窗口模型"
+            )
+        else:
+            summary = (
+                f"{bad['target_tokens'] // 1000}k tokens 处仅召回 "
+                f"{bad['needles_found']}/{bad['needles_total']} needles "
+                "—— 可能存在轻度截断或上下文压缩"
+            )
     else:
-        # All probed tiers passed
-        highest = tier_results[-1]["target_tokens"] // 1000
+        # All probed tiers passed. Highest probed tier reached.
+        highest = probed[-1]["target_tokens"] // 1000
         status = "pass"
-        summary = f"完整通过 {highest}k tokens 长上下文检测,未发现截断证据"
+        if skip_count > 0:
+            summary = (
+                f"完整通过 {highest}k tokens 长上下文检测;更高档因模型自身 "
+                "上限未测"
+            )
+        else:
+            summary = f"完整通过 {highest}k tokens 长上下文检测,未发现截断证据"
 
     return score, status, summary
 
