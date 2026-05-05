@@ -37,12 +37,10 @@
   "@context": "https://schema.org",
   "@type": "FAQPage",
   "mainEntity": [
-    {"@type":"Question","name":"OpenAI 中转站把 GPT 偷换成 Claude 怎么发现?","acceptedAnswer":{"@type":"Answer","text":"看响应的 usage 字段。原生 OpenAI 只有 prompt_tokens / completion_tokens / total_tokens 三个键。如果出现 claude_cache_creation_5_m_tokens、usage_source: anthropic、input_tokens / output_tokens(Anthropic 命名)等字段,基本可以判定中转站在做协议转换。Veridrop 把这种指纹标记为 critical 级别。"}},
-    {"@type":"Question","name":"我用的 GPT-4o 检测出 75 分,verdict 是 marginal,怎么解读?","acceptedAnswer":{"@type":"Answer","text":"75 分本身在通过区间,但如果有 critical 级别 issues(尤其 protocol detector 报多个 critical),Veridrop 会把 verdict 砍到 marginal — 圆圈变黄、提示存在风险。这通常意味着接口能用但中转站在做协议转换,实际跑的可能不是真的 GPT 模型。"}},
-    {"@type":"Question","name":"response_format json_schema strict 不生效是什么意思?","acceptedAnswer":{"@type":"Answer","text":"OpenAI strict 模式应该返回纯 JSON,不能包 Markdown 代码块。如果返回 Markdown 包裹的 JSON,有两种可能:① 中转站没透传 response_format 参数;② 透传了但底层模型(很可能不是 GPT)不理解 strict 模式。Veridrop 通过 markdown_json_seen 标志区分这两种情况。"}},
-    {"@type":"Question","name":"OpenAI 中转站测出来 0 个模型可用怎么办?","acceptedAnswer":{"@type":"Answer","text":"Veridrop 的预探测会列出该 key 在中转站上有多少模型属于本协议。如果当前页是 OpenAI 但 0 个 GPT 模型,会显示提示并自动建议去其他协议页(Claude / Gemini)继续检测。"}},
-    {"@type":"Question","name":"OpenAI 中转站检测覆盖哪些维度?","acceptedAnswer":{"@type":"Answer","text":"7 项:basic_request、model_consistency、function_calling、structured_output、protocol、integrity、token_billing。standard 模式约 40 秒,full 模式约 70 秒。"}},
-    {"@type":"Question","name":"为什么 OpenAI 检测不能像 Claude 一样加密级验证?","acceptedAnswer":{"@type":"Answer","text":"因为 OpenAI 协议本身没有同等级的服务端加密签名机制。Claude 有 thinking signature 这种独特的加密产物,中转站理论上无法伪造;OpenAI 的真伪只能靠协议合规度 + 后端指纹间接推断。所以 OpenAI 检测定位为行为/协议级,不宣称加密级真伪判断。"}}
+    {"@type":"Question","name":"我花钱买的是 GPT,怎么知道中转站没偷偷换成更便宜的模型?","acceptedAnswer":{"@type":"Answer","text":"看响应里有没有「穿帮」的字段。OpenAI 官方回包只会出现三个 token 计数字段;如果中转站偷偷把请求转给 Claude 后端、再包装成 OpenAI 格式发回来,Anthropic 那边的字段经常会跟着漏出来。Veridrop 抓到这种本不该出现的字段就会标记成严重问题,把整体评级降到黄色。简单说:正版 GPT 会按 OpenAI 自家说明书回话,冒牌包装层经常露出对面厂家的痕迹。"}},
+    {"@type":"Question","name":"我得了 75 分,为什么圆圈还是黄色而不是绿色?","acceptedAnswer":{"@type":"Answer","text":"分数只是其中一个维度。Veridrop 还会看有没有严重问题 — 哪怕分数到了通过线,只要存在 1 条严重问题(比如字段穿帮),整体结论就会降到黄色「小心使用」。这种情况通常意味着接口能用、能返回结果,但跑的可能不是你以为的那个模型。日常聊天可能没大问题,但跑代码或严肃任务建议换一家。"}},
+    {"@type":"Question","name":"测完显示「0 个 GPT 模型可用」,是中转站挂了吗?","acceptedAnswer":{"@type":"Answer","text":"大概率不是中转站坏了,而是这把 key 没开通 GPT 模型权限。很多综合中转站把模型按厂家分组卖,有的客户买的是 Claude 卡、有的是 Gemini 卡,没买就调不出对应模型。Veridrop 检测前会先快速看一眼你这把 key 能用哪些模型 — 如果当前是 OpenAI 页但 0 个 GPT,系统会自动提示你这把 key 实际能用 X 个 Claude 模型,直接点过去就行。"}},
+    {"@type":"Question","name":"为什么 OpenAI 的检测不像 Claude 那样能「拍胸脯保证真伪」?","acceptedAnswer":{"@type":"Answer","text":"因为 OpenAI 没在响应里放「数学证明」级别的防伪码。Claude 有一种叫 thinking signature 的加密签名,中转站没法伪造,所以 Veridrop 在 Claude 那边能给出非常确定的结论。OpenAI 这边只能从行为像不像 GPT、字段格式对不对、能力完不完整这些间接线索判断,所以定位为行为/协议级检测 — 能告诉你「看起来正常」或者「看起来可疑」,做不到 100% 数学证明。想要确定结论,推荐用 Claude 模型检测同一家中转站。"}}
   ]
 }
 </script>
@@ -173,37 +171,47 @@
   <h2>常见问题(精选)</h2>
 
   <details class="faq-item" open>
-    <summary>OpenAI 中转站把 GPT 偷换成 Claude 有什么直接证据?</summary>
+    <summary>我花钱买的是 GPT,怎么知道中转站没偷偷换成更便宜的模型?</summary>
     <div class="faq-body">
-      <p>响应的 <code>usage</code> 字段是最直接的证据。真原生 OpenAI 只有
-        <code>prompt_tokens / completion_tokens / total_tokens</code>。如果发现
-        <code>claude_cache_creation_5_m_tokens</code>、<code>usage_source: anthropic</code> 等字段,
-        基本可以判定中转站在协议转换。Veridrop 标为 critical,直接拒绝该项 detector。</p>
+      <p>看响应里有没有「穿帮」的字段。OpenAI 官方回包里只会出现三个 token 计数字段;
+        但如果中转站偷偷把你的请求转给了 Claude 后端、再包装成 OpenAI 格式发回来,
+        Anthropic 那边的字段经常会跟着漏出来。Veridrop 一旦在响应里抓到这种本不该出现的字段,
+        就会把它标记成「严重问题」,整体评级降到黄色。</p>
+      <p class="muted small">简单说:正版 GPT 会按 OpenAI 自家说明书回话,
+        冒牌的偷懒包装层经常露出对面厂家的痕迹。</p>
     </div>
   </details>
 
   <details class="faq-item">
-    <summary>我的 GPT-4o 检测出 75 分,verdict 是 marginal,怎么解读?</summary>
+    <summary>我得了 75 分,为什么圆圈还是黄色而不是绿色?</summary>
     <div class="faq-body">
-      <p>75 分本身在「通过」区间,但如果有任何 critical 级别的 issues,
-        Veridrop 会把 verdict 砍到 marginal — 圆圈变黄、提示「存在风险」。
-        这通常意味着接口能用但中转站在做协议转换,实际跑的可能不是真的 GPT 模型。</p>
+      <p>分数只是其中一个维度。Veridrop 还会看「有没有严重问题」 — 哪怕分数到了通过线,
+        只要存在 1 条严重问题(比如上面说的字段穿帮),整体结论就会降到黄色「小心使用」。</p>
+      <p>遇到这种情况通常意味着:接口能用、能返回结果,但跑的可能不是你以为的那个模型。
+        如果你只是聊天、写写日常文本可能没大问题;但如果用来跑代码、做严肃任务,建议换一家。</p>
     </div>
   </details>
 
   <details class="faq-item">
-    <summary>response_format=json_schema strict 不生效是什么意思?</summary>
+    <summary>测完显示「0 个 GPT 模型可用」,是中转站挂了吗?</summary>
     <div class="faq-body">
-      <p>OpenAI strict 模式应该返回纯 JSON。如果返回 ```json {...} ``` 格式,有两种可能:
-        ① 中转站没透传 response_format 参数;② 透传了但底层模型(很可能不是 GPT)不理解 strict 模式。</p>
+      <p>大概率不是中转站坏了,而是<strong>这把 key 没开通 GPT 模型权限</strong>。
+        很多综合中转站把模型按厂家分组卖,有的客户买的是 Claude 卡、有的是 Gemini 卡,
+        没买就调不出对应模型。</p>
+      <p>Veridrop 检测前会先快速看一眼你这把 key 能用哪些模型 — 如果当前是 OpenAI 页但 0 个 GPT,
+        系统会自动提示你「这把 key 实际能用 X 个 Claude 模型,要去那边测吗?」直接点过去就行。</p>
     </div>
   </details>
 
   <details class="faq-item">
-    <summary>OpenAI 中转站测出来 0 个模型可用怎么办?</summary>
+    <summary>为什么 OpenAI 的检测不像 Claude 那样能「拍胸脯保证真伪」?</summary>
     <div class="faq-body">
-      <p>Veridrop 的预探测会列出该 key 在中转站上有多少模型属于本协议。如果是 0,
-        会显示一个黄色卡片提示「该 key 在此中转站没有 GPT 模型,但有 X 个 Claude 模型 → 一键跳转测那边」。</p>
+      <p>因为 OpenAI 没在响应里放「数学证明」级别的防伪码。Claude 有一种叫
+        <strong>thinking signature</strong> 的加密签名,中转站没法伪造,所以 Veridrop 在
+        Claude 那边能给出非常确定的结论。</p>
+      <p>OpenAI 这边只能从「行为像不像 GPT、字段格式对不对、能力完不完整」这些间接线索判断,
+        所以我们的口径是「<strong>行为/协议级</strong>」检测 — 能告诉你「看起来正常」或者
+        「看起来可疑」,但做不到 100% 数学证明。想要确定结论,推荐用 Claude 模型检测同一家中转站。</p>
     </div>
   </details>
 
