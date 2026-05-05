@@ -1,5 +1,33 @@
 # Veridrop · AI API 中转站检测工具
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Tests](https://github.com/canarybyte/veridrop/actions/workflows/test.yml/badge.svg)](https://github.com/canarybyte/veridrop/actions/workflows/test.yml)
+[![Live demo](https://img.shields.io/badge/demo-veridrop.org-10b981.svg)](https://veridrop.org)
+
+> **TL;DR (English)**: Open-source authenticity & quality detector for AI API relays
+> (proxies). Given `base_url + api_key + model`, Veridrop runs probes against the relay,
+> compares results to a known-good baseline, and answers three questions:
+>
+> 1. **Authenticity** — is the relay actually serving the Claude / GPT / Gemini model
+>    it claims? (uses **Claude thinking signature** crypto verification, the only
+>    cryptographic-grade authenticity check in this category)
+> 2. **Capability** — has the relay stripped PDF / Tool Use / Thinking / Function
+>    Calling support?
+> 3. **Compliance** — do response fields, ID prefixes, streaming events, and usage
+>    accounting match the official protocol?
+>
+> Bonus: **needle-in-haystack long-context probing** (32k → 1M tokens) catches
+> relays that advertise 1M context but silently truncate at 200k.
+>
+> Live demo at **[veridrop.org](https://veridrop.org)** — no sign-up, API key
+> never persisted. Self-host with one `docker compose up` (see below).
+>
+> ⭐ If you've ever been burned by a fake relay, **star this repo** so others
+> can find it.
+
+---
+
 一个开源的 AI API 中转站(relay / proxy)真伪与质量检测工具。给定一个 `base_url + api_key + model`,自动跑一组探针请求,把结果跟「官方真品基线」做**字段级、协议级、加密级**对比,回答三个问题:
 
 1. **真伪**:这家中转站给我的真的是它声称的模型吗?(Claude / GPT / Gemini)
