@@ -161,6 +161,27 @@ class LongContextDetector(ActiveDetector):
             },
         )
 
+    async def _precount_input_tokens(
+        self, client, model: str, prompt: str
+    ) -> int | None:
+        """Ask Anthropic exactly how many input_tokens the request will be,
+        without sending it.
+
+        Returns None on any failure (relay doesn't implement the endpoint,
+        rate-limited, network error). Caller falls back to its chars/token
+        estimate in that case — better to proceed with a slight overshoot
+        risk than to fail the whole tier on a count_tokens hiccup.
+        """
+        try:
+            _req, resp, _h, _lat = await client.count_tokens(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception:  # noqa: BLE001 — best-effort verification only
+            return None
+        n = resp.get("input_tokens") if isinstance(resp, dict) else None
+        return n if isinstance(n, int) else None
+
     async def _probe_tier_with_tpm_retry(
         self,
         client,
@@ -196,11 +217,11 @@ class LongContextDetector(ActiveDetector):
         seed: str,
         ctx_limit: int,
     ) -> dict:
-        # Reserved tokens for: question text (~250) + Anthropic system
-        # overhead (~2000) + safety margin against tokenizer drift (~2750).
-        # Live measured 2026-05-05: 200k tier with buffer=1500 still
-        # overshot by 1.5k tokens, so bumped to 5000 for guaranteed safety.
-        QUESTION_BUFFER = 5000
+        # Use chars/tok estimation only as the FIRST guess. The real source
+        # of truth is Anthropic's /v1/messages/count_tokens endpoint — we
+        # call it before sending to know exactly how big the request will
+        # be, then trim if it would exceed ctx_limit.
+        QUESTION_BUFFER = 1500
         tier_seed = f"{seed}:{target_tokens}"
         needles = make_needles(tier_seed)
         haystack_target = min(
@@ -212,6 +233,27 @@ class LongContextDetector(ActiveDetector):
         )
         question = build_question(needles)
         full_prompt = haystack + question
+
+        # Verify exact input_tokens via count_tokens API. This is Anthropic's
+        # canonical way to predict token cost without sending — accurate to
+        # the token. If the relay doesn't support this endpoint, we silently
+        # fall through to send with our chars/tok estimate.
+        precounted = await self._precount_input_tokens(client, model, full_prompt)
+        if precounted is not None and precounted > ctx_limit - 500:
+            # Trim: compute actual chars/token and rebuild haystack to fit.
+            # The 0.97 factor is 3% extra margin in case the rebuild lands
+            # slightly larger than predicted (Anthropic's own count is
+            # deterministic per model+content though, so margin is small).
+            actual_chars_per_tok = len(full_prompt) / max(precounted, 1)
+            target_total_chars = (ctx_limit - 500) * actual_chars_per_tok * 0.97
+            new_haystack_chars = max(0, target_total_chars - len(question))
+            new_haystack_tokens = max(
+                1000, int(new_haystack_chars / actual_chars_per_tok)
+            )
+            haystack = assemble_haystack(
+                new_haystack_tokens, needles, tier_seed, protocol="anthropic",
+            )
+            full_prompt = haystack + question
 
         cost = estimate_cost_usd(target_tokens, model)
         timeout = _tier_timeout_s(target_tokens)
