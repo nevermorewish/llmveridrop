@@ -750,6 +750,7 @@ _DETECTOR_DISPLAY = {
         ("integrity", "响应完整性"),
         ("token_usage", "Token 用量"),
         ("message_id", "消息标识规范"),
+        ("long_context", "长上下文真实性"),
     ],
     "openai": [
         ("basic_request", "基础请求"),
@@ -759,6 +760,7 @@ _DETECTOR_DISPLAY = {
         ("protocol", "协议规范性"),
         ("integrity", "流式一致性"),
         ("token_billing", "Token 计费"),
+        ("long_context", "长上下文真实性"),
     ],
     "gemini": [
         ("basic_request", "基础请求"),
@@ -787,6 +789,11 @@ def _result_rows(report: dict) -> list[dict]:
         score = float(r.get("score") or 0.0)
         if status == "pass":
             label_short, css = "通过", "ok"
+        elif status == "skip" and name == "long_context":
+            # long_context is opt-in. Skip can mean "user didn't check the
+            # box", "model context too small", or "all tiers rate-limited".
+            # The detail's summary clarifies which; the badge stays neutral.
+            label_short, css = "未启用", "muted"
         elif status == "skip" and name in {"token_billing", "token_usage"}:
             label_short, css = "无法判断", "muted"
         elif status == "skip":
