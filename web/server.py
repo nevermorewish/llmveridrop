@@ -355,6 +355,7 @@ async def api_detect_claude(
     api_key: str = Form(...),
     model: str = Form(...),
     mode: str = Form("full"),
+    include_long_context: bool = Form(False),
 ) -> JSONResponse:
     base_url = base_url.strip()
     api_key = api_key.strip()
@@ -381,7 +382,11 @@ async def api_detect_claude(
         inferred = _protocol_from_model(model)
         if inferred != "anthropic":
             await _preflight_or_422(request, base_url, api_key, model, inferred)
-            job_id = await jobs.submit(base_url, api_key, model, mode, protocol=inferred)
+            job_id = await jobs.submit(
+                base_url, api_key, model, mode,
+                protocol=inferred,
+                include_long_context=include_long_context,
+            )
             return JSONResponse({"job_id": job_id, "status_url": f"/api/status/{job_id}"})
     elif _protocol_from_model(model) == "gemini":
         raise HTTPException(
@@ -395,7 +400,11 @@ async def api_detect_claude(
         )
 
     await _preflight_or_422(request, base_url, api_key, model, "anthropic")
-    job_id = await jobs.submit(base_url, api_key, model, mode, protocol="anthropic")
+    job_id = await jobs.submit(
+        base_url, api_key, model, mode,
+        protocol="anthropic",
+        include_long_context=include_long_context,
+    )
     # NOTE: never echo api_key back in the response
     return JSONResponse({"job_id": job_id, "status_url": f"/api/status/{job_id}"})
 
@@ -407,6 +416,7 @@ async def api_detect_openai(
     api_key: str = Form(...),
     model: str = Form(...),
     mode: str = Form("standard"),
+    include_long_context: bool = Form(False),
 ) -> JSONResponse:
     base_url = base_url.strip()
     api_key = api_key.strip()
@@ -423,7 +433,11 @@ async def api_detect_openai(
         raise HTTPException(status_code=400, detail=f"mode must be one of {_VALID_MODES}")
 
     await _preflight_or_422(request, base_url, api_key, model, "openai")
-    job_id = await jobs.submit(base_url, api_key, model, mode, protocol="openai")
+    job_id = await jobs.submit(
+        base_url, api_key, model, mode,
+        protocol="openai",
+        include_long_context=include_long_context,
+    )
     return JSONResponse({"job_id": job_id, "status_url": f"/api/status/{job_id}"})
 
 

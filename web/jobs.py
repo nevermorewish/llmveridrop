@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -36,7 +37,11 @@ from relay_detector.scorer import (
 
 JobStatus = Literal["queued", "running", "done", "error"]
 
-JOBS_DIR = Path("/opt/veridrop/web_data/jobs")
+# Production default; override via VERIDROP_JOBS_DIR in tests / dev so the
+# import doesn't try to mkdir into /opt/veridrop on a developer laptop.
+JOBS_DIR = Path(
+    os.environ.get("VERIDROP_JOBS_DIR", "/opt/veridrop/web_data/jobs")
+)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Cap concurrent detections so a flood of submissions doesn't exhaust file
@@ -77,8 +82,15 @@ async def submit(
     model: str,
     mode: str,
     protocol: str = "anthropic",
+    include_long_context: bool = False,
 ) -> str:
-    """Queue a detection job and return the job id immediately."""
+    """Queue a detection job and return the job id immediately.
+
+    When ``include_long_context`` is True, the runner will probe long-context
+    truncation at 32k/100k/200k tiers — adds ~$0.05–$0.50 of upstream API
+    cost and 30–90s of wall time. Off by default so a regular detect stays
+    cheap (~$0.005).
+    """
     job_id = _new_job_id()
     job = Job(
         id=job_id,
@@ -89,8 +101,12 @@ async def submit(
     )
     async with _LOCK:
         _JOBS[job_id] = job
-    # fire-and-forget; the asyncio task lives until the runner finishes.
-    asyncio.create_task(_run(job_id, base_url, api_key, model, mode, protocol))
+    asyncio.create_task(
+        _run(
+            job_id, base_url, api_key, model, mode, protocol,
+            include_long_context,
+        )
+    )
     return job_id
 
 
@@ -152,6 +168,7 @@ async def _run(
     model: str,
     mode: str,
     protocol: str,
+    include_long_context: bool = False,
 ) -> None:
     async with _SEMA:
         async with _LOCK:
@@ -163,6 +180,7 @@ async def _run(
 
         try:
             cfg = ExecutionConfig.for_mode(Mode(mode), max_concurrent=3)
+            cfg.include_long_context = include_long_context
             if protocol == "openai":
                 outcome = await _run_openai(base_url, api_key, model, cfg)
                 report_protocol = Protocol.OPENAI

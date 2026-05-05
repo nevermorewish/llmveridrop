@@ -122,6 +122,18 @@
       </div>
     </div>
 
+    <div class="field-checkbox">
+      <input type="checkbox" id="include_long_context" name="include_long_context" value="true" />
+      <label for="include_long_context">
+        <strong>深度检测:长上下文真实性</strong>
+        <span class="checkbox-hint">
+          额外发 32k → 100k → 200k tokens 探针验证中转站是否真实兑现宣传的 context window
+          (识别截断 / 路由到小窗口模型)。失败立即停。
+          <strong>额外成本约 $0.05–$0.50,由你的 API key 支付。</strong>
+        </span>
+      </label>
+    </div>
+
     <button type="submit" id="submit-btn" class="btn btn-primary">
       开始检测
     </button>
