@@ -1,18 +1,15 @@
-"""OpenAI long-context truncation detector — needle-in-haystack.
+"""Anthropic long-context truncation detector — needle-in-haystack.
 
-Tests whether the relay actually delivers the model's advertised context
-window or silently truncates / routes to a smaller-window model.
+Mirrors the OpenAI implementation but speaks Anthropic Messages API:
+  - client.messages_create(...) instead of chat_completions_create
+  - max_tokens (not max_completion_tokens)
+  - response uses content[].text blocks
+  - usage.input_tokens (not prompt_tokens)
 
-Strategy (tiered, stop-on-first-failure):
-
-  Tier 1: 32k tokens   — catches transport-layer truncation (nginx body cap)
-  Tier 2: 100k tokens  — catches mid-tier truncation (relay summarizes long inputs)
-  Tier 3: 200k tokens  — catches high-end truncation (relay routes 4o → 4o-mini)
-
-Each tier sends a haystack with three needles at 10% / 50% / 90% positions
-and asks the model to retrieve them. We stop probing further tiers as
-soon as one fails — there's no point spending $0.30 on the 200k probe
-when the 32k probe already proved truncation at 16k.
+For now we DO NOT enable the context-1m beta header, so Opus 4.7's
+effective limit stays 200k (matching Sonnet/Haiku's default tier). 1M
+testing is planned as a separate opt-in flag with explicit cost preview
+($30/run at premium tier pricing) — see docs/long_context_1m.md (TBD).
 
 Opt-in (config.include_long_context). Default: skipped.
 """
@@ -33,32 +30,28 @@ from ....core.models import DetectorResult
 from .base import ActiveDetector
 
 
-# Tier sizes in input tokens. Stopping after the first failure means even a
-# bad relay only burns the cheapest probe(s); a clean relay pays full price
-# for all three but at gpt-4o-mini that's still ~$0.50 total.
+# Same tier sizes as OpenAI for cross-protocol comparability. Stop on first
+# fail/partial. At Haiku 4.5 ($1/M input) total cost if all probed: ~$0.33.
 TIERS_TOKENS = (32_000, 100_000, 200_000)
 
-# Each tier's pass threshold. Real models occasionally miss a needle —
-# Anthropic and OpenAI both publish ~99% recall, so 2/3 needles is "minor
-# wobble", 1/3 is "definite truncation", 0/3 is "completely cut off".
-PASS_THRESHOLD = 3      # all needles → pass
-PARTIAL_THRESHOLD = 2   # 2/3 → partial (warn but continue)
-FAIL_THRESHOLD = 1      # ≤1 → fail (stop probing higher tiers)
+PASS_THRESHOLD = 3
+PARTIAL_THRESHOLD = 2
 
-# Headroom for the response so the model can recite three IDs comfortably.
-# Reasoning models (o1/o3/gpt-5) burn extra reasoning tokens, so leave a
-# generous buffer or finish_reason=length cuts off the answer mid-list.
+# Anthropic's max_tokens caps the OUTPUT, not the input. 256 is enough for
+# the model to recite three IDs comfortably; some Anthropic models burn
+# extra tokens on adaptive thinking, so leave headroom.
 MAX_OUTPUT_TOKENS = 256
 
 
 class LongContextDetector(ActiveDetector):
     name = "long_context"
     display_name = "长上下文真实性"
-    weight = 15.0  # heavy when it runs — context window is a top-tier promise
+    weight = 15.0  # heavy — context-window fraud is among the worst lies
 
     async def run(self, client, model: str) -> DetectorResult:
-        # Opt-in gate: respects config.include_long_context. Without this gate,
-        # every full-mode detection would burn $0.50 of the user's API key.
+        # Opt-in gate: respect ExecutionConfig.include_long_context. Without
+        # this gate every full-mode detection would burn $0.05–$0.50 of the
+        # user's API key.
         if not self.config or not self.config.include_long_context:
             return self.skip(
                 "长上下文检测为可选项,需在请求时勾选(成本约 $0.05–$0.50)"
@@ -70,9 +63,6 @@ class LongContextDetector(ActiveDetector):
         truncation_at: int | None = None
         reached_tier: int | None = None
 
-        # Don't probe beyond the model's own advertised limit — those tiers
-        # would generate 400 errors that would be misclassified as relay
-        # truncation. The model itself is the limiter, not the relay.
         ctx_limit = model_context_limit(model)
 
         for target_tokens in TIERS_TOKENS:
@@ -86,7 +76,7 @@ class LongContextDetector(ActiveDetector):
                         f"模型 {model} 上限为 {ctx_limit} tokens,跳过此档"
                     ),
                     "estimated_cost_usd": 0.0,
-                    "prompt_tokens_reported": None,
+                    "input_tokens_reported": None,
                 })
                 continue
 
@@ -96,13 +86,7 @@ class LongContextDetector(ActiveDetector):
             tier_results.append(tier_result)
             total_cost_usd += tier_result["estimated_cost_usd"]
             reached_tier = target_tokens
-            # Stop on fail OR partial — partial is treated as fail in
-            # aggregation, so paying $0.30 for the next tier just to confirm
-            # the same conclusion is wasteful.
             if tier_result["status"] in ("fail", "partial"):
-                # Estimate where truncation occurred: somewhere between the
-                # last tier that passed and this one. If even 32k failed,
-                # truncation is below 32k.
                 last_pass = next(
                     (
                         t["target_tokens"]
@@ -112,7 +96,7 @@ class LongContextDetector(ActiveDetector):
                     None,
                 )
                 if last_pass is None:
-                    truncation_at = target_tokens // 2  # rough lower-bound
+                    truncation_at = target_tokens // 2
                 else:
                     truncation_at = (last_pass + target_tokens) // 2
                 break
@@ -129,6 +113,7 @@ class LongContextDetector(ActiveDetector):
                 "truncation_inferred_at_tokens": truncation_at,
                 "estimated_cost_usd": round(total_cost_usd, 4),
                 "model": model,
+                "model_context_limit": ctx_limit,
                 "opt_in": True,
             },
         )
@@ -141,13 +126,6 @@ class LongContextDetector(ActiveDetector):
         seed: str,
         ctx_limit: int,
     ) -> dict:
-        """Run one tier: build haystack, send, score recall.
-
-        Haystack is sized to leave ~QUESTION_BUFFER tokens of headroom for the
-        question itself + a small response. For tiers at the model's exact
-        context limit (e.g. 200k tier on a 200k model), the haystack is
-        clamped to ctx_limit - buffer so the request actually fits.
-        """
         QUESTION_BUFFER = 500
         tier_seed = f"{seed}:{target_tokens}"
         needles = make_needles(tier_seed)
@@ -161,31 +139,31 @@ class LongContextDetector(ActiveDetector):
 
         cost = estimate_cost_usd(target_tokens, model)
         try:
-            _req, resp, _h, _lat = await client.chat_completions_create(
+            _req, resp, _h, _lat = await client.messages_create(
                 model=model,
-                max_completion_tokens=MAX_OUTPUT_TOKENS,
+                max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0,
                 messages=[{"role": "user", "content": full_prompt}],
             )
         except Exception as e:  # noqa: BLE001
-            # Network errors (413 too-large, timeouts, etc.) are treated as
-            # truncation evidence — the relay refused to handle this size.
+            # 413 / context-too-long / timeout etc. — treat as truncation
+            # evidence (relay couldn't deliver the advertised window).
             return {
                 "target_tokens": target_tokens,
                 "needles_total": len(needles),
                 "needles_found": 0,
                 "status": "fail",
                 "error": str(e)[:300],
-                "estimated_cost_usd": 0.0,  # not charged when request errors
-                "prompt_tokens_reported": None,
+                "estimated_cost_usd": 0.0,
+                "input_tokens_reported": None,
                 "response_text_preview": None,
             }
 
-        text = _message_text(resp)
+        text = _join_text(resp.get("content"))
         recalls = evaluate_recalls(text, needles)
         found = sum(recalls)
         usage = resp.get("usage") or {}
-        prompt_tokens = usage.get("prompt_tokens")
+        input_tokens = usage.get("input_tokens")
 
         if found >= PASS_THRESHOLD:
             tier_status = "pass"
@@ -204,33 +182,21 @@ class LongContextDetector(ActiveDetector):
             ],
             "status": tier_status,
             "estimated_cost_usd": cost,
-            "prompt_tokens_reported": prompt_tokens,
+            "input_tokens_reported": input_tokens,
             "response_text_preview": text[:400],
         }
 
 
 def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
-    """Combine per-tier outcomes into one score / status / human summary.
-
-    Three kinds of tier entries can appear in tier_results:
-      - probed (pass/partial/fail): tested with a real request
-      - skip: not probed because target exceeds model's own context window
-      - (loop break): tiers after a fail aren't in tier_results at all
-
-    Scoring drops skip entries — they reflect a model limit, not a relay
-    flaw, so penalizing for them would conflate two different problems.
-    Tiers untested because of an earlier failure are also dropped from the
-    denominator: the failed tier's 0% already represents the verdict, and
-    averaging two 0% tiers would just halve the score for the same evidence.
-    """
+    """Same scoring philosophy as the OpenAI variant — drop skip tiers
+    from the average so model-limit constraints don't penalize the relay.
+    See protocols/openai/detectors/long_context.py:_aggregate for the full
+    rationale."""
     if not tier_results:
         return 0.0, "error", "未跑任何 tier"
 
     probed = [t for t in tier_results if t["status"] != "skip"]
     if not probed:
-        # Model's own context limit is below all our probe tiers — we
-        # couldn't test anything. Caller will have already reported this
-        # via the skip tier entries.
         return 0.0, "skip", "模型自身 context 上限低于检测最低档 (32k),跳过"
 
     per_tier_pct = []
@@ -239,7 +205,7 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
             per_tier_pct.append(100.0)
         elif t["status"] == "partial":
             per_tier_pct.append(66.0)
-        else:  # fail
+        else:
             per_tier_pct.append(0.0)
     score = sum(per_tier_pct) / len(per_tier_pct)
 
@@ -265,7 +231,6 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
                 "—— 可能存在轻度截断或上下文压缩"
             )
     else:
-        # All probed tiers passed. Highest probed tier reached.
         highest = probed[-1]["target_tokens"] // 1000
         status = "pass"
         if skip_count > 0:
@@ -279,12 +244,14 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
     return score, status, summary
 
 
-def _message_text(resp: dict) -> str:
-    choices = resp.get("choices")
-    if not isinstance(choices, list) or not choices:
+def _join_text(content) -> str:
+    """Concat all text blocks from an Anthropic Messages content array."""
+    if not isinstance(content, list):
         return ""
-    msg = choices[0].get("message") if isinstance(choices[0], dict) else None
-    if not isinstance(msg, dict):
-        return ""
-    content = msg.get("content")
-    return content if isinstance(content, str) else ""
+    parts = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "text":
+            t = b.get("text")
+            if isinstance(t, str):
+                parts.append(t)
+    return "".join(parts)

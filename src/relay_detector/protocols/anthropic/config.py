@@ -24,6 +24,10 @@ DETECTOR_WEIGHTS: dict[str, float] = {
     "integrity": 5.0,
     "token_usage": 10.0,
     "message_id": 5.0,
+    # Heavy weight when it runs (context-window fraud is among the worst
+    # lies). Skipped (0 effective weight) when ExecutionConfig.include_long_context
+    # is False, so default full-mode runs stay cheap.
+    "long_context": 15.0,
 }
 
 

@@ -253,6 +253,11 @@ class ThrottledClient:
         # all streams ≈ best-case relay first-token latency.
         self._ttft_samples_ms: list[int] = []
 
+    @property
+    def base_url(self) -> str:
+        """Pass-through so detectors treat this wrapper as the underlying client."""
+        return self._base.base_url
+
     async def _wait_for_backoff(self) -> None:
         while True:
             now = time.monotonic()
