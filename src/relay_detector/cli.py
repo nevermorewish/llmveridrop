@@ -181,11 +181,18 @@ def _fmt(v) -> str:
 def detect(
     base_url: str = typer.Option(
         None, "--base-url", envvar="ANTHROPIC_BASE_URL",
-        help="Relay station base URL.",
+        help=(
+            "Relay station base URL. Reads ANTHROPIC_BASE_URL; "
+            "for --protocol openai/gemini also falls back to "
+            "OPENAI_BASE_URL / GEMINI_BASE_URL or each protocol's official endpoint."
+        ),
     ),
     api_key: str = typer.Option(
         None, "--api-key", envvar="ANTHROPIC_API_KEY",
-        help="API key (sk-...).",
+        help=(
+            "API key. Reads ANTHROPIC_API_KEY by default; for non-anthropic "
+            "protocols falls back to OPENAI_API_KEY / GEMINI_API_KEY."
+        ),
     ),
     model: str = typer.Option(
         "claude-haiku-4-5", "--model", envvar="ANTHROPIC_MODEL",
@@ -195,9 +202,14 @@ def detect(
         Mode.STANDARD,
         "--mode",
         case_sensitive=False,
+        help="quick / standard / full",
+    ),
+    protocol: Optional[str] = typer.Option(
+        None, "--protocol",
         help=(
-            "quick / standard / full. Note: M2 implements only protocol/"
-            "message_id/integrity, so quick may be near-empty until M3."
+            "anthropic / openai / gemini. Auto-detected from model name "
+            "(claude* → anthropic, gpt*/o1/o3 → openai, gemini* → gemini) "
+            "if omitted."
         ),
     ),
     max_concurrent: int = typer.Option(
@@ -220,11 +232,31 @@ def detect(
     ),
 ) -> None:
     """Run a multi-detector quality check against a relay station."""
+    proto = _resolve_protocol(protocol, model)
+
+    # Per-protocol envvar fallback so users can keep distinct keys for
+    # each provider in the same .env without juggling them on the CLI.
+    if not base_url and proto != Protocol.ANTHROPIC:
+        base_url = os.environ.get(f"{proto.value.upper()}_BASE_URL") or ""
+    if not api_key and proto != Protocol.ANTHROPIC:
+        api_key = os.environ.get(f"{proto.value.upper()}_API_KEY") or ""
+
+    # Default endpoint when only an API key is supplied — convenient for
+    # testing against the official OpenAI / Gemini APIs.
     if not base_url:
-        console.print("[red]error:[/red] --base-url required")
+        base_url = _DEFAULT_BASE_URLS.get(proto, "")
+
+    if not base_url:
+        console.print(
+            f"[red]error:[/red] --base-url required for {proto.value} "
+            f"(set {proto.value.upper()}_BASE_URL or pass --base-url)"
+        )
         raise typer.Exit(2)
     if not api_key:
-        console.print("[red]error:[/red] --api-key required")
+        console.print(
+            f"[red]error:[/red] --api-key required (set "
+            f"{proto.value.upper()}_API_KEY or pass --api-key)"
+        )
         raise typer.Exit(2)
 
     config = ExecutionConfig.for_mode(mode, max_concurrent=max_concurrent)
@@ -232,10 +264,73 @@ def detect(
         config.request_timeout_s = timeout
     config.include_long_context = include_long_context
 
-    asyncio.run(_run_detect(base_url, api_key, model, config, output))
+    asyncio.run(_run_detect(proto, base_url, api_key, model, config, output))
+
+
+_DEFAULT_BASE_URLS = {
+    Protocol.OPENAI: "https://api.openai.com/v1",
+    Protocol.GEMINI: "https://generativelanguage.googleapis.com/v1beta/openai",
+    # Anthropic intentionally has no default — the official endpoint requires
+    # an Anthropic key, which most relay-detector users won't have. Forcing
+    # an explicit --base-url avoids accidentally probing api.anthropic.com
+    # when the user meant a relay.
+}
+
+
+def _resolve_protocol(protocol_arg: Optional[str], model: str) -> Protocol:
+    """Pick protocol from explicit --protocol flag or model-name heuristic."""
+    if protocol_arg:
+        try:
+            return Protocol(protocol_arg.lower())
+        except ValueError:
+            console.print(
+                f"[red]error:[/red] unknown protocol '{protocol_arg}' "
+                "(expected anthropic / openai / gemini)"
+            )
+            raise typer.Exit(2)
+    # Heuristic by model id prefix — matches web/server.py:_protocol_from_model.
+    s = (model or "").strip().lower().removeprefix("models/")
+    if s.startswith("claude") or "/claude" in s:
+        return Protocol.ANTHROPIC
+    if s.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):
+        return Protocol.OPENAI
+    if s.startswith("gemini"):
+        return Protocol.GEMINI
+    return Protocol.ANTHROPIC  # fallback for unknown / legacy aliases
+
+
+_PROTOCOL_TIERS = {
+    Protocol.ANTHROPIC: (
+        DetectionTier.CRYPTOGRAPHIC,
+        "加密级验证",
+        (
+            "Claude thinking signature 来自 Anthropic 服务端签名。"
+            "通过该项时,它是当前检测集中最高可信度的真伪信号。"
+        ),
+    ),
+    Protocol.OPENAI: (
+        DetectionTier.BEHAVIORAL,
+        "行为/协议级验证",
+        (
+            "本检测无法可靠区分高配模型真品与低配模型伪装。"
+            "我们检测的是中转站接口是否符合 OpenAI Chat Completions 协议规范、"
+            "能力是否完整、usage 字段是否符合官方响应形状。"
+        ),
+    ),
+    Protocol.GEMINI: (
+        DetectionTier.PROTOCOL,
+        "协议级验证",
+        (
+            "本检测通过 OpenAI 兼容协议 (POST /chat/completions) 探测 "
+            "Gemini 中转站,验证响应字段、tool 调用、结构化输出、流式一致性"
+            "和 usage 字段是否符合 OpenAI 规范。它不提供加密级模型真伪证明。"
+        ),
+    ),
+}
 
 
 async def _run_detect(
+    protocol: Protocol,
     base_url: str,
     api_key: str,
     model: str,
@@ -244,17 +339,41 @@ async def _run_detect(
 ) -> None:
     masked = mask_api_key(api_key)
     console.print(
-        f"[bold]Detecting[/bold] base_url=[cyan]{base_url}[/cyan] "
+        f"[bold]Detecting[/bold] protocol=[cyan]{protocol.value}[/cyan] "
+        f"base_url=[cyan]{base_url}[/cyan] "
         f"model=[cyan]{model}[/cyan] mode=[cyan]{config.mode.value}[/cyan] "
         f"key=[dim]{masked}[/dim]"
     )
 
-    detectors = build_all()
+    # Per-protocol module gives us build_detectors / build_runner / make_client
+    # with identical signatures, so the dispatch below is essentially mechanical.
+    if protocol == Protocol.ANTHROPIC:
+        from .protocols.anthropic import (
+            build_detectors,
+            build_runner,
+            make_client,
+        )
+    elif protocol == Protocol.OPENAI:
+        from .protocols.openai import (
+            build_detectors,
+            build_runner,
+            make_client,
+        )
+    elif protocol == Protocol.GEMINI:
+        from .protocols.gemini import (
+            build_detectors,
+            build_runner,
+            make_client,
+        )
+    else:
+        raise typer.Exit(f"unsupported protocol: {protocol.value}")
 
-    async with AnthropicClient(
+    detectors = build_detectors(config.mode)
+
+    async with make_client(
         base_url, api_key, timeout=config.request_timeout_s
     ) as client:
-        runner = Runner(client, detectors, config)
+        runner = build_runner(client, detectors, config)
         outcome = await runner.run(model)
 
     run_error = fatal_run_error(outcome.results)
@@ -262,30 +381,28 @@ async def _run_detect(
     verdict = effective_verdict(total, outcome.results)
     summary = run_error or summary_text(total, verdict)
 
-    # Pull the model's self-reported identity from the IdentityDetector
-    # so callers can read it from the JSON top-level without digging into
-    # results[*].details.
-    identity_result = next(
-        (r for r in outcome.results if r.name == "identity"), None
-    )
+    # Identity-based fields are populated only by the Anthropic identity
+    # detector. OpenAI / Gemini have no equivalent so they stay null.
     self_id: str | None = None
     detected_brands: list[str] = []
-    if identity_result is not None and isinstance(identity_result.details, dict):
-        text = identity_result.details.get("response_text")
-        if isinstance(text, str) and text.strip():
-            self_id = text.strip()
-        brands = identity_result.details.get("detected_non_anthropic_brands")
-        if isinstance(brands, list):
-            detected_brands = [b for b in brands if isinstance(b, str)]
+    if protocol == Protocol.ANTHROPIC:
+        identity_result = next(
+            (r for r in outcome.results if r.name == "identity"), None
+        )
+        if identity_result is not None and isinstance(identity_result.details, dict):
+            text = identity_result.details.get("response_text")
+            if isinstance(text, str) and text.strip():
+                self_id = text.strip()
+            brands = identity_result.details.get("detected_non_anthropic_brands")
+            if isinstance(brands, list):
+                detected_brands = [b for b in brands if isinstance(b, str)]
 
+    tier, tier_title, tier_message = _PROTOCOL_TIERS[protocol]
     report = DetectionReport(
-        protocol=Protocol.ANTHROPIC,
-        tier=DetectionTier.CRYPTOGRAPHIC,
-        tier_title="加密级验证",
-        tier_message=(
-            "Claude thinking signature 来自 Anthropic 服务端签名。"
-            "通过该项时,它是当前检测集中最高可信度的真伪信号。"
-        ),
+        protocol=protocol,
+        tier=tier,
+        tier_title=tier_title,
+        tier_message=tier_message,
         base_url=base_url,
         api_key_masked=masked,
         target_model=model,
