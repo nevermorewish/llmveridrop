@@ -117,11 +117,19 @@ class AnthropicClient:
 
         Returns: (request_body, response_dict, response_headers, latency_ms).
         Raises AnthropicAPIError on non-2xx.
+
+        Pass ``request_timeout_s=<seconds>`` to override the client's default
+        per-request timeout — the long-context detector uses this for the
+        big tiers (950k tokens can take 3+ minutes upstream).
         """
         body.pop("stream", None)
+        timeout = body.pop("request_timeout_s", None)
         body = _sanitize_body(body)
         start = time.perf_counter()
-        resp = await self._client.post("/v1/messages", json=body)
+        kwargs: dict[str, Any] = {"json": body}
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)
+        resp = await self._client.post("/v1/messages", **kwargs)
         latency_ms = int((time.perf_counter() - start) * 1000)
         if resp.status_code >= 400:
             raise AnthropicAPIError(resp.status_code, resp.text, resp.headers)

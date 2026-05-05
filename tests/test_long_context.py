@@ -507,6 +507,119 @@ async def test_long_context_standard_tiers_unchanged():
 
 
 @pytest.mark.asyncio
+async def test_long_context_passes_timeout_to_client():
+    """Big probes need explicit timeout > the 30s default — verify the
+    detector plumbs request_timeout_s through to the client call. Without
+    this kwarg, httpx 30s timeout would kill any 200k+ probe regardless
+    of model speed."""
+    det = LongContextDetector()
+    det.config = ExecutionConfig.for_mode(
+        Mode.FULL, include_long_context_extreme=True,
+    )
+    client = _MockClient()
+    captured: list[dict] = []
+
+    async def capture(**kwargs):
+        captured.append(kwargs)
+        prompt = kwargs["messages"][0]["content"]
+        ids = ANSWER_RE.findall(prompt.upper())
+        return ({}, _build_resp("\n".join(ids[:3])), {}, 0)
+
+    client.chat_completions_create = capture
+    await det.run(client, "gpt-4.1-mini")  # 1M context, all 3 tiers probe
+
+    assert len(captured) == 3
+    for kwargs in captured:
+        assert "request_timeout_s" in kwargs, "tier must pass timeout"
+        assert kwargs["request_timeout_s"] >= 120.0, "timeout floor 120s"
+    # Tier 3 (~950k) gets a much larger timeout than tier 1 (32k)
+    assert captured[2]["request_timeout_s"] > captured[0]["request_timeout_s"]
+    assert captured[2]["request_timeout_s"] >= 200.0  # ~240s for 950k
+
+
+@pytest.mark.asyncio
+async def test_long_context_429_treated_as_rate_limited_not_truncation():
+    """OpenAI exposes long-context as a separate SKU
+    (`gpt-4.1-mini-long-context`) with its own TPM cap. Hitting that cap
+    raises HTTP 429 — which is RATE LIMITING, not truncation. Marking it
+    fail would falsely flag a compliant relay. This is the bug we caught
+    in live validation 2026-05-05 ($0.22 worth)."""
+    det = LongContextDetector()
+    det.config = ExecutionConfig.for_mode(
+        Mode.FULL, include_long_context_extreme=True,
+    )
+    client = _MockClient()
+
+    call_count = {"n": 0}
+
+    async def degrading(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # 32k probe passes
+            prompt = kwargs["messages"][0]["content"]
+            ids = ANSWER_RE.findall(prompt.upper())
+            return ({}, _build_resp("\n".join(ids[:3])), {}, 0)
+        # Subsequent tiers hit OpenAI's actual TPM error
+        raise RuntimeError(
+            "HTTP 429: Request too large for gpt-4.1-mini "
+            "(for limit gpt-4.1-mini-long-context) on tokens per min "
+            "(TPM): Limit 1000000"
+        )
+
+    client.chat_completions_create = degrading
+    result = await det.run(client, "gpt-4.1-mini")  # 1M extreme tiers
+
+    tiers = result.details["tiers_tested"]
+    # First tier passes. Second tier (~524k) hits 429 and stops the loop.
+    assert tiers[0]["status"] == "pass"
+    assert tiers[1]["status"] == "rate_limited"
+    assert "TPM" in tiers[1]["error"] or "429" in tiers[1]["error"]
+    # NO third tier — loop broke on rate_limited
+    assert len(tiers) == 2
+    # Detector overall is PASS, not fail — 32k tier proved no truncation,
+    # and the 429 doesn't count against the relay.
+    assert result.status == "pass"
+    # Score reflects only probed tiers (just the 32k pass)
+    assert result.score == 100.0
+    assert "TPM" in result.details["summary"]
+
+
+@pytest.mark.asyncio
+async def test_long_context_all_tiers_rate_limited_returns_skip():
+    """If every tier hits rate-limit (e.g. user's API key has TPM lower
+    than even our smallest probe), the detector returns skip rather
+    than a misleading pass or fail."""
+    det = LongContextDetector()
+    det.config = ExecutionConfig.for_mode(
+        Mode.FULL, include_long_context=True,
+    )
+    client = _MockClient()
+
+    async def always_429(**kwargs):
+        raise RuntimeError("HTTP 429: rate_limit_exceeded - please slow down")
+
+    client.chat_completions_create = always_429
+    result = await det.run(client, "gpt-4.1-mini")
+    assert result.status == "skip"
+    assert "rate limit" in result.details["summary"].lower()
+
+
+def test_looks_rate_limited_catches_known_patterns():
+    from relay_detector.protocols.openai.detectors.long_context import (
+        _looks_rate_limited,
+    )
+    assert _looks_rate_limited("HTTP 429: Request too large")
+    assert _looks_rate_limited("Error: rate_limit_exceeded")
+    assert _looks_rate_limited("on tokens per min (TPM): Limit 1000000")
+    assert _looks_rate_limited("requests per min exceeded")
+    # NOT rate-limited:
+    assert not _looks_rate_limited("HTTP 413: Payload Too Large")
+    assert not _looks_rate_limited("ReadTimeout")
+    assert not _looks_rate_limited("context_length_exceeded")
+    assert not _looks_rate_limited("")
+
+
+@pytest.mark.asyncio
 async def test_long_context_extreme_implies_standard():
     """If both flags are set, extreme wins (it's a superset). If only
     extreme is set, the detector still runs (extreme acts as enabler)."""

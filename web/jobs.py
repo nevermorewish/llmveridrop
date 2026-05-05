@@ -188,6 +188,15 @@ async def _run(
             cfg = ExecutionConfig.for_mode(Mode(mode), max_concurrent=3)
             cfg.include_long_context = include_long_context
             cfg.include_long_context_extreme = include_long_context_extreme
+            # Long-context probes blow past the regular per-mode wall-clock
+            # budget (60–180s). 1M-token requests alone take 2–4 minutes
+            # upstream; without this bump asyncio.wait_for kills the runner
+            # mid-detector and the user gets a misleading "fail" instead of
+            # a real result.
+            if include_long_context_extreme:
+                cfg.overall_timeout_s = max(cfg.overall_timeout_s, 600.0)
+            elif include_long_context:
+                cfg.overall_timeout_s = max(cfg.overall_timeout_s, 300.0)
             if protocol == "openai":
                 outcome = await _run_openai(base_url, api_key, model, cfg)
                 report_protocol = Protocol.OPENAI

@@ -274,6 +274,12 @@ def detect(
         config.request_timeout_s = timeout
     config.include_long_context = include_long_context
     config.include_long_context_extreme = include_long_context_extreme
+    # Long-context probes need much more wall-clock budget than the
+    # regular per-mode default. See web/jobs.py for the same logic.
+    if include_long_context_extreme:
+        config.overall_timeout_s = max(config.overall_timeout_s, 600.0)
+    elif include_long_context:
+        config.overall_timeout_s = max(config.overall_timeout_s, 300.0)
 
     asyncio.run(_run_detect(proto, base_url, api_key, model, config, output))
 

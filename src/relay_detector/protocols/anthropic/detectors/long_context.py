@@ -40,6 +40,33 @@ PARTIAL_THRESHOLD = 2
 MAX_OUTPUT_TOKENS = 256
 
 
+def _tier_timeout_s(target_tokens: int) -> float:
+    """Per-tier HTTP timeout — see OpenAI variant for full rationale.
+    Same scaling: 120s floor, +1s per 4k tokens. 950k → ~240s."""
+    return max(120.0, target_tokens / 4_000.0)
+
+
+_RATE_LIMIT_MARKERS = (
+    "http 429",
+    "rate limit",
+    "rate_limit_exceeded",
+    "tokens per min",
+    "tpm",
+    "requests per min",
+    "overloaded_error",  # Anthropic's transient overload signal
+)
+
+
+def _looks_rate_limited(err_msg: str) -> bool:
+    """See OpenAI long_context variant — same logic, same markers plus
+    Anthropic's `overloaded_error` which is also transient and not a
+    truncation signal."""
+    if not err_msg:
+        return False
+    lower = err_msg.lower()
+    return any(m in lower for m in _RATE_LIMIT_MARKERS)
+
+
 class LongContextDetector(ActiveDetector):
     name = "long_context"
     display_name = "长上下文真实性"
@@ -95,6 +122,11 @@ class LongContextDetector(ActiveDetector):
             tier_results.append(tier_result)
             total_cost_usd += tier_result["estimated_cost_usd"]
             reached_tier = target_tokens
+            # Stop on rate_limited too — TPM windows reset on the order
+            # of minutes, retrying the next tier within this run hits
+            # the same wall.
+            if tier_result["status"] == "rate_limited":
+                break
             if tier_result["status"] in ("fail", "partial"):
                 last_pass = next(
                     (
@@ -148,22 +180,37 @@ class LongContextDetector(ActiveDetector):
         full_prompt = haystack + question
 
         cost = estimate_cost_usd(target_tokens, model)
+        timeout = _tier_timeout_s(target_tokens)
         try:
             _req, resp, _h, _lat = await client.messages_create(
                 model=model,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0,
                 messages=[{"role": "user", "content": full_prompt}],
+                request_timeout_s=timeout,
             )
         except Exception as e:  # noqa: BLE001
-            # 413 / context-too-long / timeout etc. — treat as truncation
-            # evidence (relay couldn't deliver the advertised window).
+            err_msg = str(e)
+            # Distinguish rate-limit (provider's TPM/RPM cap, not
+            # truncation) from real failures (413 / context-too-long /
+            # timeout). The first should NOT count against the relay.
+            if _looks_rate_limited(err_msg):
+                return {
+                    "target_tokens": target_tokens,
+                    "needles_total": len(needles),
+                    "needles_found": 0,
+                    "status": "rate_limited",
+                    "error": err_msg[:400],
+                    "estimated_cost_usd": 0.0,
+                    "input_tokens_reported": None,
+                    "response_text_preview": None,
+                }
             return {
                 "target_tokens": target_tokens,
                 "needles_total": len(needles),
                 "needles_found": 0,
                 "status": "fail",
-                "error": str(e)[:300],
+                "error": err_msg[:300],
                 "estimated_cost_usd": 0.0,
                 "input_tokens_reported": None,
                 "response_text_preview": None,
@@ -205,8 +252,17 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
     if not tier_results:
         return 0.0, "error", "未跑任何 tier"
 
-    probed = [t for t in tier_results if t["status"] != "skip"]
+    inconclusive = {"skip", "rate_limited"}
+    probed = [t for t in tier_results if t["status"] not in inconclusive]
+    rate_limited = [t for t in tier_results if t["status"] == "rate_limited"]
+
     if not probed:
+        if rate_limited:
+            t = rate_limited[0]
+            return 0.0, "skip", (
+                f"{t['target_tokens'] // 1000}k tokens probe 触发上游 "
+                "rate limit (TPM/RPM),非中转站缺陷 —— 请稍后重试或换更高 tier 的 key"
+            )
         return 0.0, "skip", "模型自身 context 上限低于检测最低档 (32k),跳过"
 
     per_tier_pct = []
@@ -221,7 +277,7 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
 
     has_fail = any(t["status"] == "fail" for t in probed)
     has_partial = any(t["status"] == "partial" for t in probed)
-    skip_count = len(tier_results) - len(probed)
+    skip_count = sum(1 for t in tier_results if t["status"] == "skip")
 
     if has_fail or has_partial:
         bad = next(
@@ -243,11 +299,16 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
     else:
         highest = probed[-1]["target_tokens"] // 1000
         status = "pass"
+        suffix_parts = []
         if skip_count > 0:
-            summary = (
-                f"完整通过 {highest}k tokens 长上下文检测;更高档因模型自身 "
-                "上限未测"
+            suffix_parts.append("更高档因模型自身上限未测")
+        if rate_limited:
+            rl = rate_limited[0]
+            suffix_parts.append(
+                f"{rl['target_tokens'] // 1000}k 档触发上游 TPM 限制(非截断,未计分)"
             )
+        if suffix_parts:
+            summary = f"完整通过 {highest}k tokens 长上下文检测;" + ";".join(suffix_parts)
         else:
             summary = f"完整通过 {highest}k tokens 长上下文检测,未发现截断证据"
 

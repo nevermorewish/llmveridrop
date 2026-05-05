@@ -47,6 +47,38 @@ FAIL_THRESHOLD = 1      # ≤1 → fail (stop probing higher tiers)
 MAX_OUTPUT_TOKENS = 256
 
 
+def _tier_timeout_s(target_tokens: int) -> float:
+    """Per-tier HTTP timeout. The default 30s client timeout is too short
+    for big probes — empirically 1M tokens of input take 2–4 minutes
+    upstream depending on model load. Scale with input size, with a 120s
+    floor to handle network jitter on small probes."""
+    return max(120.0, target_tokens / 4_000.0)
+
+
+# Substring markers that indicate the upstream rejected our request for
+# rate-limit reasons rather than because it truncated the input. Cover
+# OpenAI's "tokens per min" / "rate_limit_exceeded" wording and the
+# generic "HTTP 429" prefix our client raises.
+_RATE_LIMIT_MARKERS = (
+    "http 429",
+    "rate limit",
+    "rate_limit_exceeded",
+    "tokens per min",
+    "tpm",
+    "requests per min",
+)
+
+
+def _looks_rate_limited(err_msg: str) -> bool:
+    """Conservative rate-limit detection — false positives here would
+    let a real truncation slip through as "rate_limited", so prefer
+    explicit TPM / 429 markers over generic 'limit' text."""
+    if not err_msg:
+        return False
+    lower = err_msg.lower()
+    return any(m in lower for m in _RATE_LIMIT_MARKERS)
+
+
 class LongContextDetector(ActiveDetector):
     name = "long_context"
     display_name = "长上下文真实性"
@@ -101,6 +133,11 @@ class LongContextDetector(ActiveDetector):
             tier_results.append(tier_result)
             total_cost_usd += tier_result["estimated_cost_usd"]
             reached_tier = target_tokens
+            # Stop on rate_limited too — TPM windows reset on the order
+            # of minutes, so a synchronous retry of the next tier within
+            # the same detection run will hit the same wall.
+            if tier_result["status"] == "rate_limited":
+                break
             # Stop on fail OR partial — partial is treated as fail in
             # aggregation, so paying $0.30 for the next tier just to confirm
             # the same conclusion is wasteful.
@@ -167,23 +204,42 @@ class LongContextDetector(ActiveDetector):
         full_prompt = haystack + question
 
         cost = estimate_cost_usd(target_tokens, model)
+        timeout = _tier_timeout_s(target_tokens)
         try:
             _req, resp, _h, _lat = await client.chat_completions_create(
                 model=model,
                 max_completion_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0,
                 messages=[{"role": "user", "content": full_prompt}],
+                request_timeout_s=timeout,
             )
         except Exception as e:  # noqa: BLE001
-            # Network errors (413 too-large, timeouts, etc.) are treated as
-            # truncation evidence — the relay refused to handle this size.
+            err_msg = str(e)
+            # 429 + TPM hits are NOT truncation evidence — they're the
+            # provider's own rate limit on long-context tiers (OpenAI
+            # exposes a separate `gpt-4.1-mini-long-context` SKU with its
+            # own TPM cap). Marking them as fail would falsely accuse a
+            # compliant relay of truncating. Treat as inconclusive.
+            if _looks_rate_limited(err_msg):
+                return {
+                    "target_tokens": target_tokens,
+                    "needles_total": len(needles),
+                    "needles_found": 0,
+                    "status": "rate_limited",
+                    "error": err_msg[:400],
+                    "estimated_cost_usd": 0.0,
+                    "prompt_tokens_reported": None,
+                    "response_text_preview": None,
+                }
+            # Genuine transport-level failures (413 / timeout / 5xx /
+            # context too long) — these ARE truncation evidence.
             return {
                 "target_tokens": target_tokens,
                 "needles_total": len(needles),
                 "needles_found": 0,
                 "status": "fail",
-                "error": str(e)[:300],
-                "estimated_cost_usd": 0.0,  # not charged when request errors
+                "error": err_msg[:300],
+                "estimated_cost_usd": 0.0,
                 "prompt_tokens_reported": None,
                 "response_text_preview": None,
             }
@@ -219,25 +275,33 @@ class LongContextDetector(ActiveDetector):
 def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
     """Combine per-tier outcomes into one score / status / human summary.
 
-    Three kinds of tier entries can appear in tier_results:
-      - probed (pass/partial/fail): tested with a real request
-      - skip: not probed because target exceeds model's own context window
-      - (loop break): tiers after a fail aren't in tier_results at all
+    Tier entry kinds:
+      - pass/partial/fail: probed with a real request
+      - skip:         model's own context limit lower than this tier
+      - rate_limited: provider's TPM cap rejected request — NOT truncation
+      - (absent):     loop broke after earlier fail/partial/rate_limited
 
-    Scoring drops skip entries — they reflect a model limit, not a relay
-    flaw, so penalizing for them would conflate two different problems.
-    Tiers untested because of an earlier failure are also dropped from the
-    denominator: the failed tier's 0% already represents the verdict, and
-    averaging two 0% tiers would just halve the score for the same evidence.
+    Scoring drops skip AND rate_limited entries — neither reflects a
+    relay flaw. Penalizing rate_limited tiers would falsely accuse a
+    compliant relay of truncating just because the user's API key has
+    a low TPM ceiling on the long-context SKU.
     """
     if not tier_results:
         return 0.0, "error", "未跑任何 tier"
 
-    probed = [t for t in tier_results if t["status"] != "skip"]
+    inconclusive = {"skip", "rate_limited"}
+    probed = [t for t in tier_results if t["status"] not in inconclusive]
+    rate_limited = [t for t in tier_results if t["status"] == "rate_limited"]
+
     if not probed:
-        # Model's own context limit is below all our probe tiers — we
-        # couldn't test anything. Caller will have already reported this
-        # via the skip tier entries.
+        # All tiers either over model limit or rate-limited. Distinguish
+        # so the user knows which problem to fix.
+        if rate_limited:
+            t = rate_limited[0]
+            return 0.0, "skip", (
+                f"{t['target_tokens'] // 1000}k tokens probe 触发上游 "
+                "rate limit (TPM/RPM),非中转站缺陷 —— 请稍后重试或换更高 tier 的 key"
+            )
         return 0.0, "skip", "模型自身 context 上限低于检测最低档 (32k),跳过"
 
     per_tier_pct = []
@@ -252,7 +316,7 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
 
     has_fail = any(t["status"] == "fail" for t in probed)
     has_partial = any(t["status"] == "partial" for t in probed)
-    skip_count = len(tier_results) - len(probed)
+    skip_count = sum(1 for t in tier_results if t["status"] == "skip")
 
     if has_fail or has_partial:
         bad = next(
@@ -275,11 +339,16 @@ def _aggregate(tier_results: list[dict]) -> tuple[float, str, str]:
         # All probed tiers passed. Highest probed tier reached.
         highest = probed[-1]["target_tokens"] // 1000
         status = "pass"
+        suffix_parts = []
         if skip_count > 0:
-            summary = (
-                f"完整通过 {highest}k tokens 长上下文检测;更高档因模型自身 "
-                "上限未测"
+            suffix_parts.append("更高档因模型自身上限未测")
+        if rate_limited:
+            rl = rate_limited[0]
+            suffix_parts.append(
+                f"{rl['target_tokens'] // 1000}k 档触发上游 TPM 限制(非截断,未计分)"
             )
+        if suffix_parts:
+            summary = f"完整通过 {highest}k tokens 长上下文检测;" + ";".join(suffix_parts)
         else:
             summary = f"完整通过 {highest}k tokens 长上下文检测,未发现截断证据"
 

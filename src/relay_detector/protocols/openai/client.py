@@ -98,9 +98,17 @@ class OpenAIChatClient:
         self, **body: Any
     ) -> tuple[dict[str, Any], dict[str, Any], httpx.Headers, int]:
         body.pop("stream", None)
+        # Per-request timeout override — long-context detector passes a
+        # tier-scaled value (e.g. 240s for a 950k probe) so big inputs
+        # don't get killed by the 30s default. Pop before _sanitize_body
+        # so it never reaches the OpenAI API as a JSON field.
+        timeout = body.pop("request_timeout_s", None)
         body = _sanitize_body(body)
         start = time.perf_counter()
-        resp = await self._client.post("/chat/completions", json=body)
+        kwargs: dict[str, Any] = {"json": body}
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)
+        resp = await self._client.post("/chat/completions", **kwargs)
         latency_ms = int((time.perf_counter() - start) * 1000)
         if resp.status_code >= 400:
             raise OpenAIAPIError(resp.status_code, resp.text, resp.headers)
