@@ -116,8 +116,9 @@ async def test_anthropic_long_context_request_error_treated_as_truncation():
 async def test_anthropic_long_context_passes_haiku_with_200k_clamp():
     """200k tier on a 200k-context model must be probed (not skipped) by
     clamping the haystack to leave room for the question. Catches the bug
-    where naive `target > limit` skips the highest tier on every Anthropic
-    model and silently lowers Veridrop's coverage."""
+    where naive `target > limit` skips the highest tier on every 200k
+    Anthropic model (Haiku 4.5, Opus 4.5, Sonnet 4.5, etc.) and silently
+    lowers Veridrop's coverage."""
     det = LongContextDetector()
     det.config = ExecutionConfig.for_mode(Mode.FULL, include_long_context=True)
     client = _MockClient()
@@ -128,7 +129,7 @@ async def test_anthropic_long_context_passes_haiku_with_200k_clamp():
         return ({}, _build_resp("\n".join(ids[:3])), {}, 0)
 
     client.messages_create = smart_response
-    result = await det.run(client, "claude-sonnet-4-6")  # 200k context
+    result = await det.run(client, "claude-haiku-4-5")  # 200k context
     tiers = result.details["tiers_tested"]
     # No skip — all three tiers actually probed even though 200k tier ==
     # model limit.

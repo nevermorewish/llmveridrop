@@ -37,32 +37,61 @@ _CHARS_PER_TOKEN = 6.0
 
 # Advertised context window per model — tiers above the model's own limit
 # would generate misleading "fail" results (the failure is the model, not
-# the relay), so the detector skips them. Conservative defaults; new
-# models added as they ship. Keys are alias prefixes so snapshot suffixes
-# (e.g. gpt-4o-mini-2024-07-18) match.
+# the relay), so the detector skips them. Keys are alias prefixes so
+# snapshot suffixes (e.g. gpt-4o-mini-2024-07-18) match.
+#
+# Verified against official docs 2026-05-05:
+#   - Anthropic: docs.anthropic.com/en/docs/about-claude/models/overview
+#       (latest comparison table + legacy models section)
+#   - OpenAI:   learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models
+#       (platform.openai.com docs return 403 for automated fetches; the
+#        Azure mirror tracks the same model spec sheet)
+#   - Gemini:   ai.google.dev/gemini-api/docs/models/<model>
+#       (per-model pages report Input token limit explicitly)
+#
+# Re-verify quarterly as new models ship — out-of-date entries cause two
+# silent failure modes:
+#   1. Limit too low  → detector skips a tier the model can actually handle
+#                       (silent coverage loss, fewer truncation catches)
+#   2. Limit too high → detector probes past the model's real limit, gets
+#                       a 400 error, and misclassifies it as relay truncation
+#                       (false positives on legitimate APIs)
 _MODEL_CONTEXT_LIMITS = {
-    # OpenAI
+    # OpenAI (per Azure model spec sheet, mirrors platform.openai.com)
+    "gpt-3.5-turbo":   16_385,
     "gpt-4o-mini":    128_000,
     "gpt-4o":         128_000,
-    "gpt-4.1-mini":  1_000_000,
-    "gpt-4.1":       1_000_000,
-    "gpt-5-mini":     256_000,
-    "gpt-5":          256_000,
-    "gpt-3.5-turbo":   16_385,
+    "gpt-4.1-mini":  1_047_576,
+    "gpt-4.1-nano":  1_047_576,
+    "gpt-4.1":       1_047_576,
+    "gpt-5-nano":     272_000,   # 400k total / 272k input / 128k output
+    "gpt-5-mini":     272_000,
+    "gpt-5":          272_000,
     "o1-mini":        128_000,
     "o1":             200_000,
+    "o3-mini":        200_000,   # was 128k in pre-2025-04 snapshots
     "o3":             200_000,
-    "o3-mini":        128_000,
-    # Anthropic — Opus 4.7 supports 1M with the context-1m beta header
-    "claude-haiku-4-5":  200_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-opus-4-7":  1_000_000,
-    "claude-opus-4-6":   200_000,
-    # Gemini
-    "gemini-2.5-flash": 1_000_000,
-    "gemini-2.5-pro":   2_000_000,
-    "gemini-1.5-pro":   2_000_000,
-    "gemini-1.5-flash": 1_000_000,
+    # Anthropic — 1M is now GA on Opus/Sonnet 4.6+ without beta header.
+    # Opus 4.7's pricing is flat $5/M with no >200k tier surcharge.
+    "claude-haiku-4-5":   200_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-opus-4-7":   1_000_000,
+    "claude-opus-4-6":   1_000_000,
+    "claude-sonnet-4-5":  200_000,
+    "claude-opus-4-5":    200_000,
+    "claude-opus-4-1":    200_000,
+    "claude-sonnet-4":    200_000,
+    "claude-opus-4":      200_000,
+    # Gemini — every current Gemini model reports 1,048,576 input tokens.
+    # 1.5 Pro historically also 1M (despite some marketing materials
+    # claiming 2M for "select customers"; default API is 1M).
+    "gemini-3.1-pro":   1_048_576,
+    "gemini-3-flash":   1_048_576,
+    "gemini-3-pro":     1_048_576,
+    "gemini-2.5-flash": 1_048_576,
+    "gemini-2.5-pro":   1_048_576,
+    "gemini-1.5-flash": 1_048_576,
+    "gemini-1.5-pro":   1_048_576,
 }
 
 
@@ -222,22 +251,28 @@ def estimate_cost_usd(target_tokens: int, model: str) -> float:
     provider tier transitions (e.g. Anthropic's >200k surcharge) which this
     helper does NOT model — only the base input rate. Conservative for users.
     """
-    # USD per 1M input tokens, base tier
+    # USD per 1M input tokens, base tier — verified 2026-05-05 against
+    # official pricing pages. Anthropic Opus 4.x dropped from $15 → $5
+    # alongside the 1M context GA release, which our older estimates missed.
     rates = {
-        # OpenAI
+        # OpenAI (platform.openai.com pricing)
+        "gpt-3.5-turbo":    0.50,
         "gpt-4o-mini":      0.15,
         "gpt-4o":           2.50,
+        "gpt-4.1-nano":     0.10,
         "gpt-4.1-mini":     0.40,
         "gpt-4.1":          2.00,
+        "gpt-5-nano":       0.05,
         "gpt-5-mini":       0.25,
-        "gpt-5":            2.50,
-        "gpt-3.5-turbo":    0.50,
-        # Anthropic
+        "gpt-5":            1.25,
+        # Anthropic (docs.anthropic.com pricing — Opus 4.x now $5/M flat)
         "claude-haiku-4-5":  1.00,
         "claude-sonnet-4-6": 3.00,
-        "claude-opus-4-7":  15.00,
-        "claude-opus-4-6":  15.00,
-        # Gemini
+        "claude-opus-4-7":   5.00,
+        "claude-opus-4-6":   5.00,
+        # Gemini (ai.google.dev pricing)
+        "gemini-3-flash":   0.075,
+        "gemini-3.1-pro":   1.25,
         "gemini-2.5-flash": 0.075,
         "gemini-2.5-pro":   1.25,
     }

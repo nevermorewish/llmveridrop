@@ -148,17 +148,34 @@ def test_estimate_cost_handles_snapshot_suffix():
 
 
 def test_model_context_limit_known_models():
+    """Values verified against official docs 2026-05-05 — see
+    _MODEL_CONTEXT_LIMITS docstring for sources. Update both the table and
+    this test together so drift surfaces in CI rather than as silent
+    coverage loss."""
+    # OpenAI
     assert model_context_limit("gpt-4o-mini") == 128_000
-    assert model_context_limit("gpt-4.1") == 1_000_000
+    assert model_context_limit("gpt-4o") == 128_000
+    assert model_context_limit("gpt-4.1") == 1_047_576
+    assert model_context_limit("gpt-5") == 272_000
+    assert model_context_limit("o3-mini") == 200_000  # was 128k pre-2025-04
+    assert model_context_limit("o1-mini") == 128_000
+    # Anthropic — 1M is GA on Opus/Sonnet 4.6+
     assert model_context_limit("claude-haiku-4-5") == 200_000
+    assert model_context_limit("claude-sonnet-4-6") == 1_000_000
+    assert model_context_limit("claude-opus-4-6") == 1_000_000
     assert model_context_limit("claude-opus-4-7") == 1_000_000
-    assert model_context_limit("gemini-2.5-pro") == 2_000_000
+    assert model_context_limit("claude-opus-4-5") == 200_000
+    # Gemini — all 1,048,576 (1MB binary) per ai.google.dev model pages
+    assert model_context_limit("gemini-2.5-pro") == 1_048_576
+    assert model_context_limit("gemini-2.5-flash") == 1_048_576
+    assert model_context_limit("gemini-3.1-pro") == 1_048_576
 
 
 def test_model_context_limit_snapshot_suffix():
     # Snapshot IDs like gpt-4o-mini-2024-07-18 should resolve via prefix.
     assert model_context_limit("gpt-4o-mini-2024-07-18") == 128_000
     assert model_context_limit("claude-haiku-4-5-20251001") == 200_000
+    assert model_context_limit("claude-sonnet-4-6-20251101") == 1_000_000
 
 
 def test_model_context_limit_unknown_falls_back_conservatively():
