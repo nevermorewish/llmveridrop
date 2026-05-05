@@ -197,6 +197,8 @@
       <dd>比较同一 prompt 的 stream 与 non-stream 文本、finish_reason 和 usage 是否一致。</dd>
       <dt>Token 计费</dt>
       <dd>检查中转站返回的输入/输出 Token 数是否自洽,并和同一次检测里的流式/非流式结果、本地可预期的变化进行对比。</dd>
+      <dt>长上下文真实性 (Long Context)</dt>
+      <dd>需在提交时勾选启用 — 用 needle-in-haystack 在 32k → 100k → 200k tokens 三档探针,验证中转站是否真兑现宣传的 context window(识别截断 / 路由到小窗口模型)。极限档可按模型完整上限自适应探到 950k+。</dd>
     </dl>
     {% elif protocol == 'gemini' %}
     <summary>Gemini 检测项各自检查什么?</summary>
@@ -217,7 +219,7 @@
       <dd>检查 <code>usageMetadata</code> 是否存在、Token 统计是否自洽,以及长短文本带来的 Token 增量是否合理。</dd>
     </dl>
     {% else %}
-    <summary>11 项检测各自检查什么?</summary>
+    <summary>12 项检测各自检查什么?</summary>
     <dl class="def-list">
       <dt>身份一致性 (Identity)</dt>
       <dd>询问模型自报身份,响应必须包含 "Claude" 与 "Anthropic",且不能自称是其他品牌(如 Kiro、AWS Q 等)。</dd>
@@ -241,6 +243,8 @@
       <dd>检查 Claude Messages 的 <code>usage.input_tokens/output_tokens</code> 是否存在、长短 prompt 增量是否合理、短输出是否没有超报,并用 stream 与 <code>count_tokens</code> 做交叉验证。</dd>
       <dt>消息标识规范 (Message ID)</dt>
       <dd>消息 <code>id</code> 必须以 <code>msg_</code> 开头、tool 块以 <code>toolu_</code> 开头。UUID 或硬编码 <code>tool_1</code> 是典型造假特征。</dd>
+      <dt>长上下文真实性 (Long Context)</dt>
+      <dd>需在提交时勾选启用 — 用 needle-in-haystack 在 32k → 100k → 200k tokens 三档探针,验证中转站是否真兑现宣传的 context window(识别截断 / 路由到小窗口模型)。Anthropic 路径用官方 <code>count_tokens</code> 端点精准预算 token,极限档可按模型完整上限自适应探到 950k+(Sonnet 4.6 / Opus 4.6/4.7 都是 1M)。</dd>
     </dl>
     {% endif %}
   </details>
