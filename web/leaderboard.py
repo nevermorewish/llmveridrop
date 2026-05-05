@@ -47,6 +47,14 @@ _RANKING_PRIOR_WEIGHT = 5.0
 # Defends path traversal, header injection, and template XSS via stray chars.
 _DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{1,251}[a-z0-9])?$")
 
+# Domains hidden from the public leaderboard (and per-domain detail pages).
+# JSON reports remain on disk and individual /r/{job_id} share links keep
+# working — only the aggregated listing pages skip them.
+_BLOCKED_DOMAINS: frozenset[str] = frozenset({
+    "api.sunyears.com",
+    "router.8864k.com",
+})
+
 
 def is_valid_domain(s: str) -> bool:
     """Whether s is safe to accept as a path parameter for /leaderboard/{domain}."""
@@ -203,6 +211,8 @@ def aggregate() -> tuple[list[RelayStats], dict[str, int]]:
             domain = _extract_domain(report.get("base_url", ""))
             if not domain:
                 continue
+            if domain in _BLOCKED_DOMAINS:
+                continue
             total_reports += 1
             protocol = str(report.get("protocol") or "anthropic")
             score = float(report.get("total_score") or 0)
@@ -288,6 +298,8 @@ def aggregate_one(domain: str) -> tuple[RelayStats, list[JobEntry]] | None:
     """
     domain = domain.strip().lower()
     if not is_valid_domain(domain):
+        return None
+    if domain in _BLOCKED_DOMAINS:
         return None
 
     relay = RelayStats(domain=domain)
