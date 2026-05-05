@@ -26,13 +26,41 @@ import re
 from dataclasses import dataclass
 
 
-# Empirical chars-per-token for our synthetic templated filler. cl100k
-# averages ~3.8 on plain English prose, but our templates use longer
-# proper-noun-heavy sentences ("Cardinal Robotics", "supply chain
-# resilience") which compress to fewer tokens per char. Live measured
-# 6.05 ch/tok at all three tiers against gpt-4o-mini official API.
-# Using 6.0 gets us within ~1% of the target token count.
-_CHARS_PER_TOKEN = 6.0
+# Empirical chars-per-token for our synthetic templated filler — varies
+# significantly by tokenizer family. Live-measured against each provider's
+# official API, gpt-4o-mini / claude-haiku-4-5 / (gemini TBD). Underestimating
+# chars/token sends MORE actual tokens than the tier label promises (we
+# overshoot the target — some buffer below means we won't blow past
+# ctx_limit). Overestimating sends FEWER (we undershoot — coverage
+# silently drops below the tier label).
+#
+# Calibration source:
+#   OpenAI 6.0 ← gpt-4o-mini live: 32k→31397 / 100k→99144 (~99% accuracy)
+#   Anthropic 5.25 ← claude-haiku-4-5 live 2026-05-05: 32k→36507 / 100k→114844
+#                   (had been 6.0, overshot by 14%, blew past 200k ctx limit
+#                    on 200k tier with HTTP 400 "prompt too long")
+#   Gemini 5.5 ← unmeasured, conservative middle estimate
+# Note Claude's chars/token varies with content length:
+#   small (32k):  ~5.22 chars/tok
+#   medium (100k): ~5.22 chars/tok
+#   large (200k clamped): ~5.93 chars/tok
+# Picking 5.5 lands the small/medium tiers slightly above target (no
+# coverage loss) and the large tier ~7% under target (mild coverage loss),
+# but crucially never overshoots ctx_limit on a 200k model.
+_CHARS_PER_TOKEN_BY_PROTOCOL = {
+    "openai":    6.0,
+    "anthropic": 5.5,
+    "gemini":    5.5,
+}
+_CHARS_PER_TOKEN_DEFAULT = 6.0  # fallback if protocol unknown
+
+
+def _chars_per_token(protocol: str | None) -> float:
+    if not protocol:
+        return _CHARS_PER_TOKEN_DEFAULT
+    return _CHARS_PER_TOKEN_BY_PROTOCOL.get(
+        protocol.lower(), _CHARS_PER_TOKEN_DEFAULT
+    )
 
 
 # Advertised context window per model — tiers above the model's own limit
@@ -250,23 +278,35 @@ def evaluate_recalls(response_text: str, needles: list[Needle]) -> list[bool]:
     return [n.answer.upper() in haystack for n in needles]
 
 
-def assemble_haystack(target_tokens: int, needles: list[Needle], seed: str) -> str:
+def assemble_haystack(
+    target_tokens: int,
+    needles: list[Needle],
+    seed: str,
+    protocol: str | None = None,
+) -> str:
     """Build a haystack of approximately target_tokens with needles embedded
     at their target positions.
+
+    `protocol` selects the tokenizer-family-specific chars/token calibration
+    (OpenAI cl100k vs Anthropic vs Gemini). Without it the function defaults
+    to OpenAI's ratio — historically the ratio used before per-protocol
+    calibration; new callers should always pass protocol explicitly so the
+    default never silently overshoots a different tokenizer.
 
     The filler text is synthetic — random template instantiations of
     plausible-looking factual sentences (fictional company reports, fake
     research summaries, etc.). This:
       - avoids copyright concerns
       - is deterministic per seed (same input → same haystack, reproducible)
-      - is varied enough that simple compressors can't shrink it (~4 ch/tok)
+      - is varied enough that simple compressors can't shrink it (~5–6 ch/tok)
       - is not in any public dataset, so models can't cheat via memorization
 
     Needles are placed at their position_pct points by inserting them
     between filler sentences. We don't slice mid-sentence to keep the
     document readable — model recall is sharper on coherent context.
     """
-    target_chars = int(target_tokens * _CHARS_PER_TOKEN)
+    chars_per_tok = _chars_per_token(protocol)
+    target_chars = int(target_tokens * chars_per_tok)
     rng = random.Random(seed + ":haystack")
 
     sentences: list[str] = []

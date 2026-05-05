@@ -233,14 +233,16 @@ class LongContextDetector(ActiveDetector):
         context limit (e.g. 200k tier on a 200k model), the haystack is
         clamped to ctx_limit - buffer so the request actually fits.
         """
-        QUESTION_BUFFER = 500
+        QUESTION_BUFFER = 1500
         tier_seed = f"{seed}:{target_tokens}"
         needles = make_needles(tier_seed)
         haystack_target = min(
             target_tokens - QUESTION_BUFFER,
             ctx_limit - QUESTION_BUFFER,
         )
-        haystack = assemble_haystack(haystack_target, needles, tier_seed)
+        haystack = assemble_haystack(
+            haystack_target, needles, tier_seed, protocol="openai",
+        )
         question = build_question(needles)
         full_prompt = haystack + question
 

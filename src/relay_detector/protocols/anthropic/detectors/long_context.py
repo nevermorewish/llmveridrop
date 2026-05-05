@@ -196,14 +196,16 @@ class LongContextDetector(ActiveDetector):
         seed: str,
         ctx_limit: int,
     ) -> dict:
-        QUESTION_BUFFER = 500
+        QUESTION_BUFFER = 1500
         tier_seed = f"{seed}:{target_tokens}"
         needles = make_needles(tier_seed)
         haystack_target = min(
             target_tokens - QUESTION_BUFFER,
             ctx_limit - QUESTION_BUFFER,
         )
-        haystack = assemble_haystack(haystack_target, needles, tier_seed)
+        haystack = assemble_haystack(
+            haystack_target, needles, tier_seed, protocol="anthropic",
+        )
         question = build_question(needles)
         full_prompt = haystack + question
 
