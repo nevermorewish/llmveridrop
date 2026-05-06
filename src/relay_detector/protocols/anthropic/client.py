@@ -41,12 +41,16 @@ PARAM_DEPRECATIONS: dict[str, tuple[str, ...]] = {
 
 
 def _sanitize_body(body: dict[str, Any]) -> dict[str, Any]:
-    """Strip body fields the target model is known to reject."""
+    """Strip body fields the target model is known to reject. Tolerates the
+    common dot-vs-hyphen typo (e.g. user types `claude-opus-4.7`) by
+    normalizing both sides before the prefix check — without this, Opus 4.7
+    requests with the dotted form leak `temperature` and trip HTTP 400."""
     model = body.get("model")
     if not isinstance(model, str):
         return body
+    normalized_model = model.replace(".", "-").replace("_", "-")
     for prefix, deprecated in PARAM_DEPRECATIONS.items():
-        if model.startswith(prefix):
+        if normalized_model.startswith(prefix):
             for k in deprecated:
                 body.pop(k, None)
     return body
