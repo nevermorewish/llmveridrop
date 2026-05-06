@@ -52,6 +52,25 @@ def test_models_match_bidirectional_prefix():
     assert models_match("", "claude-opus-4-7") is False
 
 
+def test_lookup_model_dot_hyphen_tolerance():
+    # Users frequently type the dotted form `claude-sonnet-4.5` in the
+    # web form. Without normalization the strict prefix match would silently
+    # reject it, causing thinking_signature (the most important detector)
+    # to be skipped — see the api.b.ai diagnosis 2026-05-06.
+    info = lookup_model("claude-sonnet-4.5")
+    assert info is not None
+    assert info.supports_extended_thinking is True
+    # underscore variant too
+    assert lookup_model("claude_sonnet_4_5") is not None
+
+
+def test_models_match_dot_hyphen_tolerance():
+    # Same root cause — model_consistency would falsely flag a mismatch
+    # if the user request used dots and the relay echoed back hyphens.
+    assert models_match("claude-sonnet-4.5", "claude-sonnet-4-5") is True
+    assert models_match("claude-sonnet-4-5", "claude-sonnet-4.5-20251001") is True
+
+
 # --- Knowledge: grading & parsing -----------------------------------------
 
 

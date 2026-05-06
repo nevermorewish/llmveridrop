@@ -139,23 +139,36 @@ MODELS: dict[str, ModelInfo] = {
 }
 
 
+def _normalize_model_id(model_id: str) -> str:
+    """Canonicalize model ID separators so users typing `claude-sonnet-4.5`
+    match the official `claude-sonnet-4-5` form. Without this the strict
+    prefix match silently rejects the dotted form, causing thinking_signature
+    and consistency to misfire on the most important Claude detector.
+    """
+    return model_id.replace(".", "-").replace("_", "-")
+
+
 def lookup_model(model_id: str) -> ModelInfo | None:
     """Match the user-supplied model ID against known aliases (double-prefix).
 
     Accepts both alias (`claude-opus-4-7`) and snapshot
-    (`claude-haiku-4-5-20251001`) forms.
+    (`claude-haiku-4-5-20251001`) forms, and tolerates dot-vs-hyphen
+    variants (`claude-sonnet-4.5` ≡ `claude-sonnet-4-5`).
     """
+    nid = _normalize_model_id(model_id)
     for info in MODELS.values():
         for alias in info.aliases:
-            if model_id.startswith(alias) or alias.startswith(model_id):
+            nalias = _normalize_model_id(alias)
+            if nid.startswith(nalias) or nalias.startswith(nid):
                 return info
     return None
 
 
 def models_match(request_model: str, response_model: str) -> bool:
-    """Bidirectional prefix match (alias <-> snapshot tolerance)."""
+    """Bidirectional prefix match (alias <-> snapshot tolerance), with
+    dot-vs-hyphen normalization."""
     if not request_model or not response_model:
         return False
-    return response_model.startswith(request_model) or request_model.startswith(
-        response_model
-    )
+    a = _normalize_model_id(request_model)
+    b = _normalize_model_id(response_model)
+    return b.startswith(a) or a.startswith(b)

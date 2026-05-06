@@ -62,6 +62,6 @@ def models_match(request_model: str, response_model: str) -> bool:
     """
     if not request_model or not response_model:
         return False
-    a = request_model.removeprefix("models/")
-    b = response_model.removeprefix("models/")
+    a = request_model.removeprefix("models/").replace(".", "-").replace("_", "-")
+    b = response_model.removeprefix("models/").replace(".", "-").replace("_", "-")
     return a == b or a.startswith(b) or b.startswith(a)

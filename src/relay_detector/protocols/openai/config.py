@@ -53,10 +53,10 @@ OPENAI_MODEL_CHOICES = [
 
 
 def models_match(request_model: str, response_model: str) -> bool:
+    """Bidirectional prefix match with dot-vs-hyphen normalization
+    (e.g. `gpt-5.4-mini` ≡ `gpt-5-4-mini`)."""
     if not request_model or not response_model:
         return False
-    return (
-        request_model == response_model
-        or request_model.startswith(response_model)
-        or response_model.startswith(request_model)
-    )
+    a = request_model.replace(".", "-").replace("_", "-")
+    b = response_model.replace(".", "-").replace("_", "-")
+    return a == b or a.startswith(b) or b.startswith(a)
