@@ -1,9 +1,11 @@
-# Veridrop · AI API 中转站检测工具
+# Veridrop · AI API 中转站真伪检测 / Claude · OpenAI · Gemini 中转站真假鉴定工具
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Tests](https://github.com/canarybyte/veridrop/actions/workflows/test.yml/badge.svg)](https://github.com/canarybyte/veridrop/actions/workflows/test.yml)
 [![Live demo](https://img.shields.io/badge/demo-veridrop.org-10b981.svg)](https://veridrop.org)
+
+**在线使用(无需克隆代码)**:[veridrop.org](https://veridrop.org) · 协议页直达:[Claude 中转站检测](https://veridrop.org/claude) · [OpenAI 中转站检测](https://veridrop.org/openai) · [Gemini 中转站检测](https://veridrop.org/gemini) · [中转站红黑榜](https://veridrop.org/leaderboard) · [常见问题 FAQ](https://veridrop.org/faq)
 
 > **TL;DR (English)**: Open-source authenticity & quality detector for AI API relays
 > (proxies). Given `base_url + api_key + model`, Veridrop runs probes against the relay,
