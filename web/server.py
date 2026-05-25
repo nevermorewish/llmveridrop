@@ -596,6 +596,7 @@ async def api_batch_results(ids: str) -> JSONResponse:
                 "json_url": f"/api/result/{j.id}.json",
                 "report": j.report,
                 "rows": _result_rows(j.report),
+                "perf_benchmark": _perf_benchmark_summary(j.report),
             })
         elif j.status == "error":
             item["error"] = j.error
@@ -990,6 +991,56 @@ def _result_rows(report: dict) -> list[dict]:
             "score": score,
         })
     return out
+
+
+def _num(value) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n == n else None
+
+
+def _perf_benchmark_summary(report: dict) -> dict:
+    """Derive a lightweight benchmark summary from one completed detection.
+
+    This is not a separate load test yet. It reuses the requests already made
+    by the detector run so the result page can compare relay performance
+    without extra upstream cost.
+    """
+    perf = report.get("performance") if isinstance(report.get("performance"), dict) else {}
+    usage = perf.get("usage") if isinstance(perf.get("usage"), dict) else {}
+
+    request_count = int(_num(perf.get("request_count")) or 0)
+    latency_ms = _num(perf.get("total_latency_ms"))
+    input_tokens = int(_num(usage.get("input_tokens")) or 0)
+    output_tokens = int(_num(usage.get("output_tokens")) or 0)
+    total_tokens = input_tokens + output_tokens
+    seconds = latency_ms / 1000.0 if latency_ms and latency_ms > 0 else None
+
+    output_tps = _num(perf.get("tokens_per_second"))
+    if output_tps is None and seconds and output_tokens > 0:
+        output_tps = output_tokens / seconds
+
+    return {
+        "sample": "detector_run",
+        "request_count": request_count,
+        "total_latency_ms": int(latency_ms or 0),
+        "ttft_ms": int(_num(perf.get("ttft_ms")) or 0) if perf.get("ttft_ms") is not None else None,
+        "request_throughput": request_count / seconds if seconds and request_count > 0 else None,
+        "avg_latency_ms_per_request": latency_ms / request_count if latency_ms and request_count > 0 else None,
+        "output_tokens_per_second": output_tps,
+        "total_tokens_per_second": total_tokens / seconds if seconds and total_tokens > 0 else None,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "avg_input_tokens_per_request": input_tokens / request_count if request_count > 0 else None,
+        "avg_output_tokens_per_request": output_tokens / request_count if request_count > 0 else None,
+        "backoff_events": int(_num(perf.get("backoff_events")) or 0),
+    }
 
 
 def _report_notes(report: dict) -> list[dict[str, str]]:

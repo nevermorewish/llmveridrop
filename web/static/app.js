@@ -172,6 +172,64 @@
     <input type="file" id="batch-import-file" accept="application/json,.json" hidden />
   `;
   form.insertBefore(panel, form.firstElementChild);
+  const toolbar = panel.querySelector('.batch-toolbar');
+  const toolbarActions = panel.querySelector('.batch-actions');
+  const toolbarNote = panel.querySelector('.batch-note');
+  if (toolbar && toolbarActions) {
+    toolbar.insertBefore(toolbarActions, toolbarNote || null);
+  }
+  const settingsRow = form.querySelector('.field-row');
+  if (settingsRow) {
+    const settingsPanel = document.createElement('div');
+    settingsPanel.className = 'batch-settings-panel';
+    settingsPanel.innerHTML = `
+      <div class="batch-step-head">
+        <span>步骤 1</span>
+        <div>
+          <h2>先设置检测参数</h2>
+          <p>目标模型和检测深度会应用到下面所有中转站。长上下文选项会显著增加每一组 API key 的消耗。</p>
+        </div>
+      </div>
+    `;
+    form.insertBefore(settingsPanel, panel);
+    settingsRow.classList.add('batch-settings-grid');
+    settingsPanel.appendChild(settingsRow);
+    ['include_long_context', 'include_long_context_extreme'].forEach((id) => {
+      const option = document.getElementById(id);
+      const field = option && option.closest('.field-checkbox');
+      if (field) settingsPanel.appendChild(field);
+    });
+  }
+  const batchHead = panel.querySelector('.batch-head');
+  if (batchHead) {
+    const stepHead = document.createElement('div');
+    stepHead.className = 'batch-step-head batch-step-head-compact';
+    stepHead.innerHTML = `
+      <span>步骤 2</span>
+      <div>
+        <h2>添加要对比的中转站</h2>
+        <p>每一行填写一组接口地址和 API key，可导入 JSON 或继续添加多行。</p>
+      </div>
+    `;
+    batchHead.replaceChildren(stepHead);
+  }
+  const formError = document.getElementById('form-error');
+  if (submitBtn && formError) {
+    const submitPanel = document.createElement('div');
+    submitPanel.className = 'batch-submit-panel';
+    submitPanel.innerHTML = `
+      <div class="batch-step-head batch-step-head-submit">
+        <span>步骤 3</span>
+        <div>
+          <h2>开始批量测试</h2>
+          <p>确认模型、检测深度和中转站列表后提交。每一组都会生成独立永久报告链接。</p>
+        </div>
+      </div>
+    `;
+    form.insertBefore(submitPanel, submitBtn);
+    submitPanel.appendChild(submitBtn);
+    submitPanel.appendChild(formError);
+  }
 
   const resultPanel = document.createElement('section');
   resultPanel.className = 'batch-results';
@@ -770,6 +828,16 @@
         </div>
         ${renderBatchSummaryMatrix(sorted, bestScore, bestMetrics)}
       </section>
+      <section class="batch-section batch-section-load">
+        <div class="batch-section-head">
+          <div>
+            <h3>压测结果对比</h3>
+            <p>第一阶段最小可用压测：复用本次检测已经发出的请求，按请求数、平均请求耗时、请求吞吐、Token 吞吐和退避次数做横向比较，不额外消耗 API 调用。</p>
+          </div>
+          <span>请求 / 延迟 / 吞吐</span>
+        </div>
+        ${renderBatchLoadMatrix(sorted, bestMetrics)}
+      </section>
       <section class="batch-section batch-section-checks">
         <div class="batch-section-head">
           <div>
@@ -885,6 +953,46 @@
         ${hasReport ? `<a href="${item.image_url}" target="_blank" rel="noopener">JPG</a>` : ''}
       </td>
     `;
+  }
+
+  function renderBatchLoadMatrix(items, bestMetrics) {
+    const rows = [
+      ['压测样本', 'sample', (item) => batchLoadOf(item).sample, (value) => value || '-'],
+      ['请求数', 'request_count', (item) => batchLoadOf(item).request_count, formatCount],
+      ['平均请求耗时', 'avg_latency_ms_per_request', (item) => batchLoadOf(item).avg_latency_ms_per_request, formatMs],
+      ['请求吞吐 (Req/s)', 'request_throughput', (item) => batchLoadOf(item).request_throughput, formatRate],
+      ['首 TOKEN', 'load_ttft_ms', (item) => batchLoadOf(item).ttft_ms, formatMs],
+      ['输出吞吐 (Tok/s)', 'output_tokens_per_second', (item) => batchLoadOf(item).output_tokens_per_second, formatTps],
+      ['总吞吐 (Tok/s)', 'total_tokens_per_second', (item) => batchLoadOf(item).total_tokens_per_second, formatTps],
+      ['平均输入 Tokens/请求', 'avg_input_tokens_per_request', (item) => batchLoadOf(item).avg_input_tokens_per_request, formatCount],
+      ['平均输出 Tokens/请求', 'avg_output_tokens_per_request', (item) => batchLoadOf(item).avg_output_tokens_per_request, formatCount],
+      ['退避次数', 'backoff_events', (item) => batchLoadOf(item).backoff_events, formatCount],
+    ];
+    return `
+      <div class="batch-summary-table-wrap">
+        <table class="batch-summary-table batch-summary-matrix batch-load-matrix">
+          <thead>
+            <tr>
+              <th>压测指标</th>
+              ${items.map((item) => `<th>${escapeHtml((item.report && item.report.base_url) || item.base_url || item.job_id)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(([label, key, getter, formatter]) => `
+              <tr class="batch-load-row">
+                <th>${escapeHtml(label)}</th>
+                ${items.map((item) => renderBatchLoadCell(getter(item), bestMetrics[key], formatter, key)).join('')}
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderBatchLoadCell(value, bestValue, formatter, key) {
+    const best = key !== 'sample' && isBestMetric(value, bestValue);
+    return `<td class="${best ? 'batch-best-cell' : ''}"><strong>${formatter(value)}</strong></td>`;
   }
 
   function renderBatchSummaryTable(items, bestScore, bestMetrics) {
@@ -1122,6 +1230,15 @@
       tokens_per_second: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).tokens_per_second : null, 'max'),
       input_tokens: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).input_tokens : null, 'max'),
       output_tokens: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).output_tokens : null, 'max'),
+      request_count: bestBatchValue(items, (item) => batchLoadOf(item).request_count, 'max'),
+      avg_latency_ms_per_request: bestBatchValue(items, (item) => batchLoadOf(item).avg_latency_ms_per_request, 'min'),
+      request_throughput: bestBatchValue(items, (item) => batchLoadOf(item).request_throughput, 'max'),
+      load_ttft_ms: bestBatchValue(items, (item) => batchLoadOf(item).ttft_ms, 'min'),
+      output_tokens_per_second: bestBatchValue(items, (item) => batchLoadOf(item).output_tokens_per_second, 'max'),
+      total_tokens_per_second: bestBatchValue(items, (item) => batchLoadOf(item).total_tokens_per_second, 'max'),
+      avg_input_tokens_per_request: bestBatchValue(items, (item) => batchLoadOf(item).avg_input_tokens_per_request, 'max'),
+      avg_output_tokens_per_request: bestBatchValue(items, (item) => batchLoadOf(item).avg_output_tokens_per_request, 'max'),
+      backoff_events: bestBatchValue(items, (item) => batchLoadOf(item).backoff_events, 'min'),
     };
   }
 
@@ -1155,6 +1272,49 @@
     };
   }
 
+  function batchLoadOf(item) {
+    if (!item || !item.report) return {};
+    const summary = item.perf_benchmark && typeof item.perf_benchmark === 'object'
+      ? item.perf_benchmark
+      : {};
+    const perf = batchPerformanceOf(item.report);
+    const rawPerf = item.report.performance || {};
+    const requestCount = numberOrNull(summary.request_count) !== null
+      ? numberOrNull(summary.request_count)
+      : numberOrNull(rawPerf.request_count);
+    const latency = numberOrNull(summary.total_latency_ms) !== null
+      ? numberOrNull(summary.total_latency_ms)
+      : perf.total_latency_ms;
+    const totalTokens = (perf.input_tokens || 0) + (perf.output_tokens || 0);
+    const seconds = latency !== null && latency > 0 ? latency / 1000.0 : null;
+    return {
+      sample: summary.sample === 'detector_run' ? '检测请求' : (summary.sample || '检测请求'),
+      request_count: requestCount,
+      avg_latency_ms_per_request: numberOrNull(summary.avg_latency_ms_per_request) !== null
+        ? numberOrNull(summary.avg_latency_ms_per_request)
+        : (requestCount && latency ? latency / requestCount : null),
+      request_throughput: numberOrNull(summary.request_throughput) !== null
+        ? numberOrNull(summary.request_throughput)
+        : (requestCount && seconds ? requestCount / seconds : null),
+      ttft_ms: numberOrNull(summary.ttft_ms) !== null ? numberOrNull(summary.ttft_ms) : perf.ttft_ms,
+      output_tokens_per_second: numberOrNull(summary.output_tokens_per_second) !== null
+        ? numberOrNull(summary.output_tokens_per_second)
+        : perf.tokens_per_second,
+      total_tokens_per_second: numberOrNull(summary.total_tokens_per_second) !== null
+        ? numberOrNull(summary.total_tokens_per_second)
+        : (totalTokens > 0 && seconds ? totalTokens / seconds : null),
+      avg_input_tokens_per_request: numberOrNull(summary.avg_input_tokens_per_request) !== null
+        ? numberOrNull(summary.avg_input_tokens_per_request)
+        : (requestCount && perf.input_tokens !== null ? perf.input_tokens / requestCount : null),
+      avg_output_tokens_per_request: numberOrNull(summary.avg_output_tokens_per_request) !== null
+        ? numberOrNull(summary.avg_output_tokens_per_request)
+        : (requestCount && perf.output_tokens !== null ? perf.output_tokens / requestCount : null),
+      backoff_events: numberOrNull(summary.backoff_events) !== null
+        ? numberOrNull(summary.backoff_events)
+        : numberOrNull(rawPerf.backoff_events),
+    };
+  }
+
   function numberOrNull(value) {
     if (value === null || value === undefined || value === '') return null;
     const n = Number(value);
@@ -1177,6 +1337,12 @@
     const n = numberOrNull(value);
     if (n === null) return '—';
     return n.toFixed(1);
+  }
+
+  function formatRate(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return n.toFixed(2);
   }
 
   function downloadJson(filename, payload) {
