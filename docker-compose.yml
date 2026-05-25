@@ -1,0 +1,18 @@
+services:
+  llmveridrop:
+    image: crpi-dzjyl2rfnlfugj1m.cn-shanghai.personal.cr.aliyuncs.com/frogclaw/llmveridrop:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llmveridrop
+    restart: unless-stopped
+    environment:
+      VERIDROP_JOBS_DIR: /opt/veridrop/web_data/jobs
+      VERIDROP_WISHLIST_PATH: /opt/veridrop/web_data/wishlist.txt
+    ports:
+      - "8000:8000"
+    volumes:
+      - llmveridrop_web_data:/opt/veridrop/web_data
+
+volumes:
+  llmveridrop_web_data:
