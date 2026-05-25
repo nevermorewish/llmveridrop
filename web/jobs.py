@@ -1,8 +1,8 @@
-"""Job queue for HTTP-driven detections.
+﻿"""Job queue for HTTP-driven detections.
 
 Wraps the same Runner the CLI uses. Single uvicorn worker, in-process state
 guarded by an asyncio lock. Done jobs are persisted to disk so a server
-restart keeps the shareable result URLs alive. API keys are NEVER persisted —
+restart keeps the shareable result URLs alive. API keys are NEVER persisted 鈥?
 the masked form goes to disk; the raw key lives only in the Job until the run
 finishes, then is dropped from memory.
 """
@@ -89,14 +89,24 @@ async def submit(
 
     Long-context probe is opt-in. Two tiers:
       - ``include_long_context`` (standard): 32k/100k/200k probes,
-        $0.05–$0.50 upstream cost, 30–90s extra wall time.
+        $0.05鈥?0.50 upstream cost, 30鈥?0s extra wall time.
       - ``include_long_context_extreme`` (adaptive): probes proportionally
-        up to the model's advertised limit (e.g. 32k→500k→950k for 1M
-        models). $0.05–$8 cost, 30s–5min wall time. Catches "advertised X
+        up to the model's advertised limit (e.g. 32k鈫?00k鈫?50k for 1M
+        models). $0.05鈥?8 cost, 30s鈥?min wall time. Catches "advertised X
         but capped at Y<X" fraud that the standard tier misses on big
         models. Implies standard (it's a superset).
     """
     job_id = _new_job_id()
+    append_log(
+        job_id,
+        protocol,
+        (
+            f"queued protocol={protocol} base_url={base_url} model={model} "
+            f"mode={mode} api_key={mask_api_key(api_key)} "
+            f"long_context={include_long_context} "
+            f"long_context_extreme={include_long_context_extreme}"
+        ),
+    )
     job = Job(
         id=job_id,
         protocol=protocol,
@@ -157,6 +167,31 @@ def image_path(job_id: str, protocol: str) -> Path:
     return protocol_dir / f"{job_id}.jpg"
 
 
+def log_path(job_id: str, protocol: str) -> Path:
+    protocol_dir = JOBS_DIR / protocol
+    protocol_dir.mkdir(parents=True, exist_ok=True)
+    return protocol_dir / f"{job_id}.log"
+
+
+def log_candidates(job_id: str) -> list[Path]:
+    return [
+        JOBS_DIR / f"{job_id}.log",
+        JOBS_DIR / "anthropic" / f"{job_id}.log",
+        JOBS_DIR / "openai" / f"{job_id}.log",
+        JOBS_DIR / "gemini" / f"{job_id}.log",
+    ]
+
+
+def append_log(job_id: str, protocol: str, message: str) -> None:
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        log_path(job_id, protocol).open("a", encoding="utf-8").write(
+            f"{ts} {message.rstrip()}\n"
+        )
+    except OSError:
+        return
+
+
 def _report_candidates(job_id: str) -> list[Path]:
     return [
         JOBS_DIR / f"{job_id}.json",
@@ -185,11 +220,12 @@ async def _run(
             j.started_at = time.time()
 
         try:
+            append_log(job_id, protocol, "started")
             cfg = ExecutionConfig.for_mode(Mode(mode), max_concurrent=3)
             cfg.include_long_context = include_long_context
             cfg.include_long_context_extreme = include_long_context_extreme
             # Long-context probes blow past the regular per-mode wall-clock
-            # budget (60–180s). 1M-token requests alone take 2–4 minutes
+            # budget (60鈥?80s). 1M-token requests alone take 2鈥? minutes
             # upstream; the extreme path may also sleep 75s per tier waiting
             # for an OpenAI/Anthropic TPM window to reset before retrying
             # rate-limited probes (see _probe_tier_with_tpm_retry).
@@ -199,7 +235,17 @@ async def _run(
                 cfg.overall_timeout_s = max(cfg.overall_timeout_s, 900.0)
             elif include_long_context:
                 cfg.overall_timeout_s = max(cfg.overall_timeout_s, 300.0)
+            append_log(
+                job_id,
+                protocol,
+                (
+                    f"config request_timeout_s={cfg.request_timeout_s} "
+                    f"overall_timeout_s={cfg.overall_timeout_s} "
+                    f"max_concurrent={cfg.max_concurrent}"
+                ),
+            )
             if protocol == "openai":
+                append_log(job_id, protocol, "running openai detectors")
                 outcome = await _run_openai(base_url, api_key, model, cfg)
                 report_protocol = Protocol.OPENAI
                 report_tier = DetectionTier.BEHAVIORAL
@@ -210,23 +256,25 @@ async def _run(
                     "能力是否完整、usage 字段是否符合官方响应形状。"
                 )
             elif protocol == "gemini":
+                append_log(job_id, protocol, "running gemini detectors")
                 outcome = await _run_gemini(base_url, api_key, model, cfg)
                 report_protocol = Protocol.GEMINI
                 report_tier = DetectionTier.PROTOCOL
                 tier_title = "协议级验证"
                 tier_message = (
-                    "本检测通过 OpenAI 兼容协议 (POST /chat/completions) 探测 Gemini 中转站,"
+                    "本检测通过 OpenAI 兼容协议 (POST /chat/completions) 探测 Gemini 中转站，"
                     "验证响应字段、tool 调用、结构化输出、流式一致性和 usage 字段是否符合 OpenAI 规范。"
                     "它不提供加密级模型真伪证明。"
                 )
             elif protocol == "anthropic":
+                append_log(job_id, protocol, "running anthropic detectors")
                 outcome = await _run_anthropic(base_url, api_key, model, cfg)
                 report_protocol = Protocol.ANTHROPIC
                 report_tier = DetectionTier.CRYPTOGRAPHIC
                 tier_title = "加密级验证"
                 tier_message = (
                     "Claude thinking signature 来自 Anthropic 服务端签名。"
-                    "通过该项时,它是当前检测集中最高可信度的真伪信号。"
+                    "通过该项时，它是当前检测集中最高可信度的真伪信号。"
                 )
             else:
                 raise ValueError(f"unsupported protocol: {protocol}")
@@ -235,6 +283,24 @@ async def _run(
             score = 0.0 if run_error else compute_total(outcome.results)
             verdict = effective_verdict(score, outcome.results)
             summary = run_error or summary_text(score, verdict)
+            append_log(
+                job_id,
+                protocol,
+                (
+                    f"runner finished detectors={len(outcome.results)} "
+                    f"score={score:.1f} verdict={verdict} summary={summary}"
+                ),
+            )
+            for r in outcome.results:
+                err = f" error={r.error}" if r.error else ""
+                append_log(
+                    job_id,
+                    protocol,
+                    (
+                        f"detector name={r.name} status={r.status} "
+                        f"score={r.score:.1f} duration_ms={r.duration_ms}{err}"
+                    ),
+                )
 
             self_id: str | None = None
             brands: list[str] = []
@@ -273,6 +339,7 @@ async def _run(
                 json.dumps(report_dict, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            append_log(job_id, protocol, f"report written path={report_path(job_id, protocol)}")
 
             async with _LOCK:
                 if job_id in _JOBS:
@@ -280,8 +347,10 @@ async def _run(
                     _JOBS[job_id].protocol = protocol
                     _JOBS[job_id].report = report_dict
                     _JOBS[job_id].finished_at = time.time()
+            append_log(job_id, protocol, "done")
 
-        except Exception as e:  # noqa: BLE001 — bubble error into job state
+        except Exception as e:  # noqa: BLE001 鈥?bubble error into job state
+            append_log(job_id, protocol, f"error {type(e).__name__}: {e}")
             async with _LOCK:
                 if job_id in _JOBS:
                     _JOBS[job_id].status = "error"
@@ -338,3 +407,4 @@ async def _run_gemini(
     async with make_client(base_url, api_key, timeout=cfg.request_timeout_s) as client:
         runner = build_runner(client, build_detectors(cfg.mode), cfg)
         return await runner.run(model)
+

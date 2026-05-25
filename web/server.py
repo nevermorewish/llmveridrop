@@ -534,6 +534,76 @@ async def api_result_json(job_id: str) -> JSONResponse:
     return JSONResponse(j.report)
 
 
+@app.get("/api/logs/{job_id}.txt")
+async def api_job_log(job_id: str) -> Response:
+    text = _job_log_text(job_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail="log not found")
+    return Response(
+        content=text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/logs/{job_id}", response_class=HTMLResponse)
+async def job_log_page(request: Request, job_id: str) -> HTMLResponse:
+    text = _job_log_text(job_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail="log not found")
+    j = await jobs.get(job_id)
+    return templates.TemplateResponse(
+        request,
+        "logs.html",
+        {"job_id": job_id, "job": j, "log_text": text},
+    )
+
+
+@app.get("/api/batch/results")
+async def api_batch_results(ids: str) -> JSONResponse:
+    job_ids = [
+        part.strip() for part in ids.split(",")
+        if part.strip()
+    ]
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="ids required")
+    if len(job_ids) > 50:
+        raise HTTPException(status_code=400, detail="too many jobs")
+
+    items = []
+    for job_id in job_ids:
+        j = await jobs.get(job_id)
+        if j is None:
+            items.append({"job_id": job_id, "status": "missing"})
+            continue
+        item = {
+            "job_id": job_id,
+            "status": j.status,
+            "protocol": j.protocol,
+            "base_url": j.base_url,
+            "target_model": j.target_model,
+            "mode": j.mode,
+            "created_at": j.created_at,
+            "started_at": j.started_at,
+            "finished_at": j.finished_at,
+            "log_url": f"/logs/{job_id}",
+            "log_text_url": f"/api/logs/{job_id}.txt",
+        }
+        if j.status == "done" and j.report is not None:
+            item.update({
+                "result_url": f"/r/{j.id}",
+                "image_url": f"/r/{j.id}.jpg",
+                "json_url": f"/api/result/{j.id}.json",
+                "report": j.report,
+                "rows": _result_rows(j.report),
+            })
+        elif j.status == "error":
+            item["error"] = j.error
+        items.append(item)
+
+    return JSONResponse({"items": items})
+
+
 # NOTE: declare .jpg route BEFORE the bare /r/{job_id} HTML route. Starlette
 # path params match `[^/]+` greedily so `/r/{job_id}` would otherwise swallow
 # `/r/foo.jpg` (job_id="foo.jpg") and shadow the image endpoint.
@@ -559,8 +629,79 @@ async def result_jpg(job_id: str) -> Response:
     )
 
 
+@app.get("/batch", response_class=HTMLResponse)
+async def batch_page(request: Request, ids: str = "") -> HTMLResponse:
+    job_ids = [
+        part.strip() for part in ids.split(",")
+        if part.strip()
+    ][:50]
+    if not job_ids:
+        raise HTTPException(status_code=404, detail="batch jobs not found")
+
+    protocol = "claude"
+    first = await jobs.get(job_ids[0])
+    if first is not None:
+        protocol = {
+            "anthropic": "claude",
+            "openai": "openai",
+            "gemini": "gemini",
+        }.get(first.protocol, "claude")
+    return templates.TemplateResponse(
+        request,
+        "batch.html",
+        {"ids": job_ids, "protocol_path": protocol},
+    )
+
+
 _PROTOCOL_LABELS = {"anthropic": "Claude", "openai": "OpenAI", "gemini": "Gemini"}
 _VERDICT_LABELS = {"passed": "通过", "marginal": "存在风险", "failed": "未达标"}
+
+
+def _job_log_text(job_id: str) -> str | None:
+    for path in jobs.log_candidates(job_id):
+        if not path.exists():
+            continue
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+    report = None
+    for path in (
+        jobs.JOBS_DIR / f"{job_id}.json",
+        jobs.JOBS_DIR / "anthropic" / f"{job_id}.json",
+        jobs.JOBS_DIR / "openai" / f"{job_id}.json",
+        jobs.JOBS_DIR / "gemini" / f"{job_id}.json",
+    ):
+        if not path.exists():
+            continue
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+            break
+        except (json.JSONDecodeError, OSError):
+            continue
+    if report is None:
+        return None
+
+    lines = [
+        f"legacy log synthesized from report job_id={job_id}",
+        f"base_url={report.get('base_url', '')}",
+        f"protocol={report.get('protocol', '')} model={report.get('target_model', '')} mode={report.get('mode', '')}",
+        f"score={report.get('total_score', '')} verdict={report.get('verdict', '')} summary={report.get('summary', '')}",
+    ]
+    if report.get("run_error"):
+        lines.append(f"run_error={report['run_error']}")
+    for r in report.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        line = (
+            f"detector name={r.get('name')} status={r.get('status')} "
+            f"score={r.get('score')} duration_ms={r.get('duration_ms')}"
+        )
+        if r.get("error"):
+            line += f" error={r.get('error')}"
+        lines.append(line)
+    return "\n".join(lines) + "\n"
 
 
 def _seo_meta_for_report(report: dict) -> dict[str, str]:

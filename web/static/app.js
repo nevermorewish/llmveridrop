@@ -109,11 +109,1208 @@
 // current protocol has 0 matches) offer one-click handoff to a protocol
 // the relay DOES carry.
 (function () {
+  const form = document.getElementById('detect-form');
+  if (!form) return;
   const protocol =
     location.pathname.startsWith('/claude') ? 'anthropic' :
     location.pathname.startsWith('/openai') ? 'openai' :
     location.pathname.startsWith('/gemini') ? 'gemini' : null;
   if (!protocol) return;
+
+  const baseUrlInput = document.getElementById('base_url');
+  const apiKeyInput = document.getElementById('api_key');
+  const modelInput = document.getElementById('model');
+  const submitBtn = document.getElementById('submit-btn');
+  if (!baseUrlInput || !apiKeyInput || !modelInput || !submitBtn) return;
+
+  form.dataset.batch = 'true';
+  baseUrlInput.required = false;
+  apiKeyInput.required = false;
+
+  const baseField = baseUrlInput.closest('.field');
+  const keyField = apiKeyInput.closest('.field');
+  if (baseField) baseField.remove();
+  if (keyField) keyField.remove();
+
+  const protocolLabel = {
+    anthropic: 'Claude',
+    openai: 'OpenAI',
+    gemini: 'Gemini',
+  }[protocol];
+  submitBtn.textContent = '开始批量检测';
+
+  const panel = document.createElement('div');
+  panel.className = 'batch-panel';
+  panel.innerHTML = `
+    <div class="batch-head">
+      <div>
+        <h2>多家中转站对比检测</h2>
+        <p>一次提交多组接口地址和 API key，完成后按分数、结论和 detector 明细并排对比。每一组仍会生成独立永久报告链接。</p>
+      </div>
+      <div class="batch-actions">
+        <button type="button" class="btn btn-ghost" id="batch-import-btn">导入 JSON</button>
+        <button type="button" class="btn btn-ghost" id="batch-export-config-btn">导出配置</button>
+      </div>
+    </div>
+    <div class="batch-table-wrap">
+      <table class="batch-table" aria-label="${protocolLabel} relays">
+        <thead>
+          <tr>
+            <th>中转站接口地址</th>
+            <th>API 密钥</th>
+            <th>状态</th>
+            <th class="batch-row-actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="batch-relay-list"></tbody>
+      </table>
+    </div>
+    <div class="batch-toolbar">
+      <button type="button" class="btn btn-ghost" id="batch-add-btn">添加中转站</button>
+      <span class="batch-note">导出配置会包含明文 API key，只适合保存在你自己的本机环境。</span>
+    </div>
+    <input type="file" id="batch-import-file" accept="application/json,.json" hidden />
+  `;
+  form.insertBefore(panel, form.firstElementChild);
+
+  const resultPanel = document.createElement('section');
+  resultPanel.className = 'batch-results';
+  resultPanel.id = 'batch-results';
+  resultPanel.hidden = true;
+  const formCard = form.closest('.form-card') || form.parentNode;
+  formCard.parentNode.insertBefore(resultPanel, formCard.nextSibling);
+
+  const list = document.getElementById('batch-relay-list');
+  const importFile = document.getElementById('batch-import-file');
+  let rowSeq = 0;
+  let activeRun = null;
+
+  function addRow(data) {
+    rowSeq += 1;
+    const tr = document.createElement('tr');
+    tr.className = 'batch-relay-row';
+    tr.dataset.rowId = String(rowSeq);
+    tr.innerHTML = `
+      <td>
+        <input class="batch-base-url" type="url" value="${escapeAttr(data && data.base_url || '')}" placeholder="https://api.example.com/v1" />
+      </td>
+      <td>
+        <input class="batch-api-key" type="password" value="${escapeAttr(data && data.api_key || '')}" placeholder="sk-..." autocomplete="off" />
+      </td>
+      <td class="batch-status" data-state="idle">待检测</td>
+      <td class="batch-row-actions">
+        <button type="button" class="btn btn-ghost batch-remove">移除</button>
+      </td>
+    `;
+    list.appendChild(tr);
+    tr.querySelector('.batch-remove').addEventListener('click', () => {
+      if (list.querySelectorAll('tr').length <= 1) {
+        clearRow(tr);
+        return;
+      }
+      tr.remove();
+      renumberPlaceholders();
+    });
+  }
+
+  function clearRow(tr) {
+    tr.querySelector('.batch-base-url').value = '';
+    tr.querySelector('.batch-api-key').value = '';
+    setRowStatus(tr, 'idle', '待检测');
+  }
+
+  function renumberPlaceholders() {
+    return;
+  }
+
+  function collectRows() {
+    return Array.from(list.querySelectorAll('tr')).map((tr, idx) => {
+      const baseUrl = tr.querySelector('.batch-base-url').value.trim();
+      return {
+        row: tr,
+        name: baseUrl || `中转站 ${idx + 1}`,
+        base_url: baseUrl,
+        api_key: tr.querySelector('.batch-api-key').value.trim(),
+      };
+    });
+  }
+
+  function collectConfig(includeKeys) {
+    const cfg = {
+      version: 1,
+      protocol,
+      model: modelInput.value.trim(),
+      mode: (form.querySelector('[name="mode"]') || {}).value || '',
+      include_long_context: Boolean(form.querySelector('[name="include_long_context"]') && form.querySelector('[name="include_long_context"]').checked),
+      include_long_context_extreme: Boolean(form.querySelector('[name="include_long_context_extreme"]') && form.querySelector('[name="include_long_context_extreme"]').checked),
+      relays: collectRows()
+        .filter((item) => item.base_url || item.api_key)
+        .map((item) => ({
+          base_url: item.base_url,
+          api_key: includeKeys ? item.api_key : undefined,
+        })),
+    };
+    cfg.relays.forEach((relay) => {
+      if (relay.api_key === undefined) delete relay.api_key;
+    });
+    return cfg;
+  }
+
+  function applyConfig(cfg) {
+    if (!cfg || !Array.isArray(cfg.relays)) {
+      throw new Error('JSON 中缺少 relays 数组');
+    }
+    if (cfg.model && typeof cfg.model === 'string') modelInput.value = cfg.model;
+    const mode = form.querySelector('[name="mode"]');
+    if (mode && cfg.mode) mode.value = cfg.mode;
+    const longContext = form.querySelector('[name="include_long_context"]');
+    if (longContext) longContext.checked = Boolean(cfg.include_long_context);
+    const extreme = form.querySelector('[name="include_long_context_extreme"]');
+    if (extreme) extreme.checked = Boolean(cfg.include_long_context_extreme);
+
+    list.innerHTML = '';
+    rowSeq = 0;
+    cfg.relays.forEach((relay) => addRow({
+      base_url: String(relay.base_url || relay.url || ''),
+      api_key: String(relay.api_key || relay.key || ''),
+    }));
+    if (!list.children.length) addRow();
+  }
+
+  function validateRows(rows) {
+    const errors = [];
+    rows.forEach((item) => {
+      if (!/^https?:\/\//.test(item.base_url)) {
+        errors.push(`${item.name}: 接口地址必须以 http:// 或 https:// 开头`);
+        setRowStatus(item.row, 'error', '地址无效');
+      }
+      if (!item.api_key || item.api_key.length < 8) {
+        errors.push(`${item.name}: API key 不能为空且至少 8 位`);
+        setRowStatus(item.row, 'error', 'key 无效');
+      }
+    });
+    return errors;
+  }
+
+  function endpointFor() {
+    return form.getAttribute('data-endpoint')
+      || (protocol === 'anthropic' ? '/api/detect/claude'
+        : protocol === 'openai' ? '/api/detect/openai'
+        : '/api/detect/gemini');
+  }
+
+  async function submitOne(item) {
+    setRowStatus(item.row, 'queued', '提交中');
+    const fd = new FormData();
+    fd.set('base_url', item.base_url);
+    fd.set('api_key', item.api_key);
+    fd.set('model', modelInput.value.trim());
+    fd.set('mode', (form.querySelector('[name="mode"]') || {}).value || 'standard');
+    const longContext = form.querySelector('[name="include_long_context"]');
+    const extreme = form.querySelector('[name="include_long_context_extreme"]');
+    if (longContext && longContext.checked) fd.set('include_long_context', 'true');
+    if (extreme && extreme.checked) fd.set('include_long_context_extreme', 'true');
+    fd.set('force', '1');
+
+    const r = await fetch(endpointFor(), {method: 'POST', body: fd});
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      const msg = typeof j.detail === 'string' ? j.detail
+        : (j.detail && (j.detail.message || j.detail.upstream_error)) || `HTTP ${r.status}`;
+      throw new Error(msg);
+    }
+    const j = await r.json();
+    setRowStatus(item.row, 'running', '运行中');
+    return j.job_id;
+  }
+
+  async function pollJob(item, jobId) {
+    while (true) {
+      if (activeRun && activeRun.cancelled) throw new Error('已取消');
+      const r = await fetch('/api/status/' + encodeURIComponent(jobId), {cache: 'no-store'});
+      if (!r.ok) throw new Error('状态查询失败: HTTP ' + r.status);
+      const status = await r.json();
+      if (status.status === 'queued') setRowStatus(item.row, 'queued', '排队中');
+      if (status.status === 'running') setRowStatus(item.row, 'running', '检测中');
+      if (status.status === 'error') throw new Error(status.error || '检测失败');
+      if (status.status === 'done') {
+        const rr = await fetch(status.json_url, {cache: 'no-store'});
+        if (!rr.ok) throw new Error('报告读取失败: HTTP ' + rr.status);
+        const report = await rr.json();
+        setRowStatus(item.row, 'done', `${Math.round(Number(report.total_score || 0))}/100`);
+        return {
+          name: item.name,
+          base_url: item.base_url,
+          job_id: jobId,
+          result_url: status.result_url,
+          image_url: status.image_url,
+          json_url: status.json_url,
+          report,
+        };
+      }
+      await delay(1600);
+    }
+  }
+
+  async function runBatch() {
+    const errBox = document.getElementById('form-error');
+    if (errBox) {
+      errBox.hidden = true;
+      errBox.textContent = '';
+      errBox.classList.remove('form-error-rich');
+    }
+    const rows = collectRows().filter((item) => item.base_url || item.api_key);
+    if (!rows.length) {
+      showFormError('至少添加一家中转站');
+      return;
+    }
+    const errors = validateRows(rows);
+    if (errors.length) {
+      showFormError(errors.join('；'));
+      return;
+    }
+
+    activeRun = {cancelled: false, started_at: new Date().toISOString()};
+    submitBtn.disabled = true;
+    submitBtn.textContent = '正在提交批量任务...';
+
+    const submitted = [];
+    for (const item of rows) {
+      try {
+        const jobId = await submitOne(item);
+        submitted.push(jobId);
+      } catch (e) {
+        setRowStatus(item.row, 'error', e.message || '失败');
+      }
+    }
+    if (submitted.length) {
+      location.href = '/batch?ids=' + encodeURIComponent(submitted.join(','));
+      return;
+    }
+    showFormError('批量任务提交失败，请检查接口地址和 API key。');
+    submitBtn.disabled = false;
+    submitBtn.textContent = '开始批量检测';
+    activeRun = null;
+  }
+
+  function renderBatchShell(rows) {
+    resultPanel.hidden = false;
+    resultPanel.innerHTML = `
+      <div class="batch-results-head">
+        <div>
+          <h2>检测对比</h2>
+          <p>已提交 ${rows.length} 家中转站，完成后会自动生成总览和 detector 明细矩阵。</p>
+        </div>
+        <button type="button" class="btn btn-ghost" id="batch-export-results-btn" disabled>导出结果</button>
+      </div>
+      <div class="batch-progress" id="batch-progress">正在提交...</div>
+      <div id="batch-results-body"></div>
+    `;
+  }
+
+  function renderBatchProgress(rows) {
+    const progress = document.getElementById('batch-progress');
+    if (!progress) return;
+    const done = rows.filter((item) => item.row.querySelector('.batch-status').dataset.state === 'done').length;
+    const failed = rows.filter((item) => item.row.querySelector('.batch-status').dataset.state === 'error').length;
+    progress.textContent = `完成 ${done}/${rows.length}，失败 ${failed}`;
+  }
+
+  function renderBatchResults(payload) {
+    const body = document.getElementById('batch-results-body');
+    const exportBtn = document.getElementById('batch-export-results-btn');
+    if (!body) return;
+    const okResults = payload.results.filter((r) => r.report);
+    const bestScore = okResults.reduce((m, r) => Math.max(m, Number(r.report.total_score || 0)), -1);
+    const sorted = payload.results.slice().sort((a, b) => scoreOf(b) - scoreOf(a));
+    const detectorNames = collectDetectorNames(okResults);
+
+    body.innerHTML = `
+      <div class="batch-summary-grid">
+        ${sorted.map((result) => renderResultCard(result, scoreOf(result) === bestScore && result.report)).join('')}
+      </div>
+      <div class="batch-compare-wrap">
+        <table class="batch-compare-table">
+          <thead>
+            <tr>
+              <th>检测项</th>
+              ${sorted.map((result) => `<th>${escapeHtml(result.name)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${renderMetricRows(sorted)}
+            ${detectorNames.map((name) => `
+              <tr>
+                <th><code>${escapeHtml(name)}</code></th>
+                ${sorted.map((result) => renderDetectorCell(result, name)).join('')}
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+    if (exportBtn) {
+      exportBtn.disabled = false;
+      exportBtn.onclick = () => downloadJson(`veridrop-${protocol}-batch-results.json`, payload);
+    }
+    resultPanel.scrollIntoView({behavior: 'smooth', block: 'start'});
+  }
+
+  function renderResultCard(result, isBest) {
+    if (!result.report) {
+      return `
+        <article class="batch-result-card batch-result-error">
+          <div class="batch-card-top">
+            <h3>${escapeHtml(result.name)}</h3>
+            <span class="batch-card-badge">失败</span>
+          </div>
+          <p class="batch-card-url">${escapeHtml(result.base_url)}</p>
+          <p class="batch-card-error">${escapeHtml(result.error || '检测失败')}</p>
+        </article>
+      `;
+    }
+    const report = result.report;
+    const counts = resultCounts(report);
+    const perf = performanceOf(report);
+    const score = Math.round(Number(report.total_score || 0));
+    const verdict = String(report.verdict || '');
+    return `
+      <article class="batch-result-card ${isBest ? 'batch-result-best' : ''}">
+        <div class="batch-card-top">
+          <h3>${escapeHtml(result.name)}</h3>
+          <span class="batch-card-badge">${isBest ? '最高分' : escapeHtml(verdict || 'done')}</span>
+        </div>
+        <p class="batch-card-url">${escapeHtml(result.base_url)}</p>
+        <div class="batch-score-line">
+          <strong>${score}</strong><span>/100</span>
+        </div>
+        <div class="batch-perf-grid">
+          <div class="batch-perf-item">
+            <span>首 TOKEN</span>
+            <strong>${formatMs(perf.ttft_ms)}</strong>
+          </div>
+          <div class="batch-perf-item">
+            <span>总耗时</span>
+            <strong>${formatMs(perf.total_latency_ms)}</strong>
+          </div>
+          <div class="batch-perf-item">
+            <span>吞吐 T/S</span>
+            <strong>${formatTps(perf.tokens_per_second)}</strong>
+          </div>
+          <div class="batch-perf-item">
+            <span>输入 TOKENS</span>
+            <strong>${formatCount(perf.input_tokens)}</strong>
+          </div>
+          <div class="batch-perf-item">
+            <span>输出 TOKENS</span>
+            <strong>${formatCount(perf.output_tokens)}</strong>
+          </div>
+        </div>
+        <p class="batch-card-meta">${counts.pass} 通过 · ${counts.fail} 未通过 · ${counts.error} 异常 · ${counts.skip} 跳过</p>
+        <p class="batch-card-summary">${escapeHtml(report.summary || '')}</p>
+        <div class="batch-card-links">
+          <a href="${result.result_url}" target="_blank" rel="noopener">永久报告</a>
+          <a href="${result.json_url}" target="_blank" rel="noopener">JSON</a>
+          <a href="${result.image_url}" target="_blank" rel="noopener">JPG</a>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderMetricRows(results) {
+    const rows = [
+      ['首 TOKEN', (perf) => formatMs(perf.ttft_ms)],
+      ['总耗时', (perf) => formatMs(perf.total_latency_ms)],
+      ['吞吐 (T/S)', (perf) => formatTps(perf.tokens_per_second)],
+      ['输入 TOKENS', (perf) => formatCount(perf.input_tokens)],
+      ['输出 TOKENS', (perf) => formatCount(perf.output_tokens)],
+    ];
+    return rows.map(([label, formatter]) => `
+      <tr class="batch-metric-row">
+        <th>${escapeHtml(label)}</th>
+        ${results.map((result) => {
+          if (!result.report) return '<td class="batch-detector-muted">-</td>';
+          return `<td><strong>${formatter(performanceOf(result.report))}</strong></td>`;
+        }).join('')}
+      </tr>
+    `).join('');
+  }
+
+  function renderDetectorCell(result, name) {
+    if (!result.report) return '<td class="batch-detector-muted">失败</td>';
+    const found = (result.report.results || []).find((r) => r && r.name === name);
+    if (!found) return '<td class="batch-detector-muted">-</td>';
+    const status = String(found.status || 'skip');
+    const score = Math.round(Number(found.score || 0));
+    return `<td><span class="batch-detector-pill batch-detector-${escapeAttr(status)}">${escapeHtml(status)} ${score}</span></td>`;
+  }
+
+  function collectDetectorNames(results) {
+    const seen = new Set();
+    results.forEach((result) => {
+      (result.report.results || []).forEach((item) => {
+        if (item && item.name) seen.add(item.name);
+      });
+    });
+    return Array.from(seen);
+  }
+
+  function resultCounts(report) {
+    const counts = {pass: 0, fail: 0, error: 0, skip: 0};
+    (report.results || []).forEach((item) => {
+      const key = item && counts[item.status] !== undefined ? item.status : 'skip';
+      counts[key] += 1;
+    });
+    return counts;
+  }
+
+  function scoreOf(result) {
+    return result.report ? Number(result.report.total_score || 0) : -1;
+  }
+
+  function performanceOf(report) {
+    const perf = report.performance || {};
+    const usage = perf.usage || {};
+    const output = numberOrNull(usage.output_tokens);
+    const latency = numberOrNull(perf.total_latency_ms);
+    const reportedTps = numberOrNull(perf.tokens_per_second);
+    const computedTps = output !== null && output > 0 && latency !== null && latency > 0
+      ? output * 1000.0 / latency
+      : null;
+    return {
+      ttft_ms: numberOrNull(perf.ttft_ms),
+      total_latency_ms: latency,
+      tokens_per_second: reportedTps !== null ? reportedTps : computedTps,
+      input_tokens: numberOrNull(usage.input_tokens),
+      output_tokens: output,
+    };
+  }
+
+  function numberOrNull(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function formatCount(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return Math.round(n).toLocaleString('en-US');
+  }
+
+  function formatMs(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return Math.round(n).toLocaleString('en-US') + 'ms';
+  }
+
+  function formatTps(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return n.toFixed(1);
+  }
+
+  function setRowStatus(tr, state, text) {
+    const cell = tr.querySelector('.batch-status');
+    cell.dataset.state = state;
+    cell.textContent = text;
+    cell.title = text;
+  }
+
+  function showFormError(text) {
+    const errBox = document.getElementById('form-error');
+    if (!errBox) return;
+    errBox.hidden = false;
+    errBox.textContent = text;
+  }
+
+  function downloadJson(filename, payload) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/`/g, '&#96;');
+  }
+
+  document.getElementById('batch-add-btn').addEventListener('click', () => {
+    addRow();
+    renumberPlaceholders();
+  });
+  document.getElementById('batch-import-btn').addEventListener('click', () => importFile.click());
+  document.getElementById('batch-export-config-btn').addEventListener('click', () => {
+    downloadJson(`veridrop-${protocol}-batch-config.json`, collectConfig(true));
+  });
+  importFile.addEventListener('change', async () => {
+    const file = importFile.files && importFile.files[0];
+    if (!file) return;
+    try {
+      applyConfig(JSON.parse(await file.text()));
+      showFormError('');
+      const errBox = document.getElementById('form-error');
+      if (errBox) errBox.hidden = true;
+    } catch (e) {
+      showFormError(e.message || 'JSON 导入失败');
+    } finally {
+      importFile.value = '';
+    }
+  });
+
+  addRow({
+    base_url: baseUrlInput.value.trim(),
+    api_key: apiKeyInput.value.trim(),
+  });
+  renumberPlaceholders();
+
+  window.veridropRunBatch = runBatch;
+})();
+
+(function () {
+  const card = document.querySelector('.batch-page-card[data-batch-ids]');
+  if (!card) return;
+
+  const ids = (card.getAttribute('data-batch-ids') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!ids.length) return;
+
+  const spinner = document.getElementById('batch-spinner');
+  const headline = document.getElementById('batch-status-headline');
+  const detail = document.getElementById('batch-status-detail');
+  const errBox = document.getElementById('batch-run-error');
+  const resultPanel = document.getElementById('batch-results');
+  const body = document.getElementById('batch-results-body');
+  const progress = document.getElementById('batch-progress');
+  const exportBtn = document.getElementById('batch-export-results-btn');
+  const shareBtn = document.getElementById('batch-share-btn');
+  let lastPayload = null;
+  let tries = 0;
+
+  async function poll() {
+    tries++;
+    try {
+      const r = await fetch('/api/batch/results?ids=' + encodeURIComponent(ids.join(',')), {
+        cache: 'no-store',
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const payload = await r.json();
+      lastPayload = payload;
+      render(payload);
+
+      const pending = payload.items.filter((item) =>
+        item.status === 'queued' || item.status === 'running'
+      ).length;
+      if (pending > 0) {
+        setTimeout(poll, 2200);
+      } else {
+        if (spinner) spinner.hidden = true;
+        if (headline) headline.textContent = '批量检测完成';
+        if (exportBtn) exportBtn.disabled = false;
+      }
+    } catch (e) {
+      if (tries > 60) {
+        if (errBox) {
+          errBox.hidden = false;
+          errBox.textContent = '批量结果轮询失败: ' + (e.message || e);
+        }
+        return;
+      }
+      setTimeout(poll, 2500);
+    }
+  }
+
+  function render(payload) {
+    const items = payload.items || [];
+    const done = items.filter((item) => item.status === 'done').length;
+    const failed = items.filter((item) => item.status === 'error' || item.status === 'missing').length;
+    const pending = items.length - done - failed;
+    if (headline) {
+      headline.textContent = pending > 0 ? '批量检测中...' : '批量检测完成';
+    }
+    if (detail) {
+      detail.textContent = `完成 ${done}/${items.length}，失败 ${failed}，等待 ${pending}`;
+    }
+    if (progress) {
+      progress.textContent = `完成 ${done}/${items.length}，失败 ${failed}，等待 ${pending}`;
+    }
+
+    const sorted = items.slice().sort((a, b) => scoreOfBatchItem(b) - scoreOfBatchItem(a));
+    const bestScore = sorted.reduce((max, item) => Math.max(max, scoreOfBatchItem(item)), -1);
+    const bestMetrics = bestBatchMetrics(sorted);
+    const labels = collectBatchLabels(sorted);
+
+    if (resultPanel) resultPanel.hidden = false;
+    if (!body) return;
+    body.innerHTML = `
+      <section class="batch-section batch-section-metrics">
+        <div class="batch-section-head">
+          <div>
+            <h3>性能指标对比</h3>
+            <p>比较每家中转站的响应速度、吞吐能力、总分、Token 用量和报告入口。绿色高亮表示该指标当前最佳。</p>
+          </div>
+          <span>速度 / 吞吐 / Tokens</span>
+        </div>
+        ${renderBatchSummaryMatrix(sorted, bestScore, bestMetrics)}
+      </section>
+      <section class="batch-section batch-section-checks">
+        <div class="batch-section-head">
+          <div>
+            <h3>检测项结果对比</h3>
+            <p>比较身份一致性、协议规范、结构化输出、Token 计费、消息 ID、长上下文等检测项的通过情况和得分。</p>
+          </div>
+          <span>真伪 / 协议 / 能力</span>
+        </div>
+        <div class="batch-compare-wrap">
+        <table class="batch-compare-table">
+          <thead>
+            <tr>
+              <th>检测项</th>
+              ${sorted.map((item) => `<th>${escapeHtml(item.base_url || item.job_id)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${labels.map((label) => `
+              <tr>
+                <th>${escapeHtml(label)}</th>
+                ${sorted.map((item) => renderBatchCheckCell(item, label)).join('')}
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        </div>
+      </section>
+    `;
+    wireBatchLogLinks(body, sorted);
+  }
+
+  function renderBatchSummaryMatrix(items, bestScore, bestMetrics) {
+    return `
+      <div class="batch-summary-table-wrap">
+        <table class="batch-summary-table batch-summary-matrix">
+          <thead>
+            <tr>
+              <th>指标</th>
+              ${items.map((item) => `<th>${escapeHtml((item.report && item.report.base_url) || item.base_url || item.job_id)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>模型 / 状态</th>
+              ${items.map((item, index) => renderBatchSummaryInfoCell(item, index, scoreOfBatchItem(item) === bestScore && item.report)).join('')}
+            </tr>
+            ${renderBatchSummaryMetricMatrixRows(items, bestMetrics)}
+            <tr>
+              <th>检测项统计</th>
+              ${items.map((item) => renderBatchSummaryCountsCell(item)).join('')}
+            </tr>
+            <tr>
+              <th>操作</th>
+              ${items.map((item, index) => renderBatchSummaryActionsCell(item, index)).join('')}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderBatchSummaryInfoCell(item, index, isBest) {
+    const hasReport = item.status === 'done' && item.report;
+    const report = item.report || {};
+    const counts = batchCounts(item.rows || []);
+    const verdict = String(report.verdict || item.status || '');
+    const hasIssue = item.status === 'error' || item.status === 'missing' || verdict === 'failed' || counts.error > 0;
+    const statusLabel = isBest ? '最高分' : (verdict || '等待中');
+    const model = report.target_model || item.target_model || item.error || '';
+    return `
+      <td class="batch-summary-cell ${hasIssue ? 'batch-result-error' : ''}" data-batch-index="${index}">
+        <span class="batch-card-badge">${escapeHtml(statusLabel)}</span>
+        <span class="batch-summary-model">${escapeHtml(model || '-')}</span>
+      </td>
+    `;
+  }
+
+  function renderBatchSummaryMetricMatrixRows(items, bestMetrics) {
+    const rows = [
+      ['总分', 'score', (item) => item.report ? Number(item.report.total_score || 0) : null, (value) => value === null ? '-' : Math.round(value) + '/100'],
+      ['首 TOKEN', 'ttft_ms', (item) => item.report ? batchPerformanceOf(item.report).ttft_ms : null, formatMs],
+      ['总耗时', 'total_latency_ms', (item) => item.report ? batchPerformanceOf(item.report).total_latency_ms : null, formatMs],
+      ['吞吐 (T/S)', 'tokens_per_second', (item) => item.report ? batchPerformanceOf(item.report).tokens_per_second : null, formatTps],
+      ['输入 TOKENS', 'input_tokens', (item) => item.report ? batchPerformanceOf(item.report).input_tokens : null, formatCount],
+      ['输出 TOKENS', 'output_tokens', (item) => item.report ? batchPerformanceOf(item.report).output_tokens : null, formatCount],
+    ];
+    return rows.map(([label, key, getter, formatter]) => `
+      <tr class="batch-metric-row">
+        <th>${escapeHtml(label)}</th>
+        ${items.map((item) => renderBatchSummaryMatrixCell(getter(item), bestMetrics[key], formatter)).join('')}
+      </tr>
+    `).join('');
+  }
+
+  function renderBatchSummaryMatrixCell(value, bestValue, formatter) {
+    const best = isBestMetric(value, bestValue);
+    return `<td class="${best ? 'batch-best-cell' : ''}"><strong>${formatter(value)}</strong></td>`;
+  }
+
+  function renderBatchSummaryCountsCell(item) {
+    if (!item.report) return `<td class="batch-summary-checks">${escapeHtml(item.error || '-')}</td>`;
+    const counts = batchCounts(item.rows || []);
+    return `<td class="batch-summary-checks">${counts.pass} 通过 / ${counts.fail} 未过 / ${counts.error} 异常 / ${counts.skip} 跳过</td>`;
+  }
+
+  function renderBatchSummaryActionsCell(item, index) {
+    const hasReport = item.status === 'done' && item.report;
+    return `
+      <td class="batch-summary-actions" data-batch-index="${index}">
+        ${hasReport ? `<a href="${item.result_url}" target="_blank" rel="noopener">报告</a>` : ''}
+        <a href="${item.log_url || ('/logs/' + item.job_id)}" target="_blank" rel="noopener">日志</a>
+        ${hasReport ? `<a href="${item.json_url}" target="_blank" rel="noopener">JSON</a>` : ''}
+        ${hasReport ? `<a href="${item.image_url}" target="_blank" rel="noopener">JPG</a>` : ''}
+      </td>
+    `;
+  }
+
+  function renderBatchSummaryTable(items, bestScore, bestMetrics) {
+    return `
+      <div class="batch-summary-table-wrap">
+        <table class="batch-summary-table">
+          <thead>
+            <tr>
+              <th>中转站</th>
+              <th>总分</th>
+              <th>结论</th>
+              <th>首 TOKEN</th>
+              <th>总耗时</th>
+              <th>吞吐 T/S</th>
+              <th>输入 TOKENS</th>
+              <th>输出 TOKENS</th>
+              <th>检测项</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map((item, index) => renderBatchSummaryRow(item, index, scoreOfBatchItem(item) === bestScore && item.report, bestMetrics)).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderBatchSummaryRow(item, index, isBest, bestMetrics) {
+    const hasReport = item.status === 'done' && item.report;
+    const report = item.report || {};
+    const perf = hasReport ? batchPerformanceOf(report) : {};
+    const counts = batchCounts(item.rows || []);
+    const verdict = String(report.verdict || item.status || '');
+    const hasIssue = item.status === 'error' || item.status === 'missing' || verdict === 'failed' || counts.error > 0;
+    const score = hasReport ? Math.round(Number(report.total_score || 0)) : null;
+    const statusLabel = isBest ? '最高分' : (verdict || '等待中');
+    const name = report.base_url || item.base_url || item.job_id;
+    const model = report.target_model || item.target_model || item.error || '';
+    return `
+      <tr class="batch-summary-row ${hasIssue ? 'batch-result-error' : ''}" data-batch-index="${index}">
+        <th class="batch-summary-relay">
+          <strong>${escapeHtml(name)}</strong>
+          <span>${escapeHtml(model)}</span>
+        </th>
+        <td class="${isBestMetric(score, bestMetrics.score) ? 'batch-best-cell' : ''}">
+          ${hasReport ? `<strong class="batch-score-chip ${isBest ? 'batch-best-value' : ''}">${score}/100</strong>` : '-'}
+        </td>
+        <td><span class="batch-card-badge">${escapeHtml(statusLabel)}</span></td>
+        ${renderBatchSummaryMetricCell(perf.ttft_ms, bestMetrics.ttft_ms, formatMs)}
+        ${renderBatchSummaryMetricCell(perf.total_latency_ms, bestMetrics.total_latency_ms, formatMs)}
+        ${renderBatchSummaryMetricCell(perf.tokens_per_second, bestMetrics.tokens_per_second, formatTps)}
+        ${renderBatchSummaryMetricCell(perf.input_tokens, bestMetrics.input_tokens, formatCount)}
+        ${renderBatchSummaryMetricCell(perf.output_tokens, bestMetrics.output_tokens, formatCount)}
+        <td class="batch-summary-checks">${hasReport ? `${counts.pass} 通过 / ${counts.fail} 未过 / ${counts.error} 异常` : escapeHtml(item.error || '-')}</td>
+        <td class="batch-summary-actions">
+          ${hasReport ? `<a href="${item.result_url}" target="_blank" rel="noopener">报告</a>` : ''}
+          <a href="${item.log_url || ('/logs/' + item.job_id)}" target="_blank" rel="noopener">日志</a>
+          ${hasReport ? `<a href="${item.json_url}" target="_blank" rel="noopener">JSON</a>` : ''}
+          ${hasReport ? `<a href="${item.image_url}" target="_blank" rel="noopener">JPG</a>` : ''}
+        </td>
+      </tr>
+    `;
+  }
+
+  function renderBatchSummaryMetricCell(value, bestValue, formatter) {
+    const best = isBestMetric(value, bestValue);
+    return `<td class="${best ? 'batch-best-cell' : ''}"><strong>${formatter(value)}</strong></td>`;
+  }
+
+  function wireBatchLogLinks(root, items) {
+    root.querySelectorAll('.batch-result-card').forEach((card, index) => {
+      const item = items[index] || {};
+      const counts = batchCounts(item.rows || []);
+      const verdict = item.report ? String(item.report.verdict || '') : '';
+      const hasIssue = item.status === 'error' || item.status === 'missing' || verdict === 'failed' || counts.error > 0;
+      const logLink = Array.from(card.querySelectorAll('a')).find((link) => {
+        const href = link.getAttribute('href') || '';
+        return href.includes('/logs/') || /log|日志|鏃ュ織/i.test(link.textContent || '');
+      });
+      if (!logLink) return;
+      logLink.removeAttribute('target');
+      logLink.removeAttribute('rel');
+      logLink.setAttribute('href', item.log_text_url || ('/api/logs/' + item.job_id + '.txt'));
+      logLink.dataset.logUrl = item.log_text_url || ('/api/logs/' + item.job_id + '.txt');
+      logLink.dataset.logTitle = '检测日志 #' + (item.job_id || '');
+      logLink.classList.add('batch-link-button');
+      logLink.classList.toggle('log-btn-hot', hasIssue);
+      card.classList.toggle('batch-result-error', hasIssue);
+    });
+    root.querySelectorAll('.batch-summary-row').forEach((row) => {
+      const index = Number(row.dataset.batchIndex || 0);
+      const item = items[index] || {};
+      const counts = batchCounts(item.rows || []);
+      const verdict = item.report ? String(item.report.verdict || '') : '';
+      const hasIssue = item.status === 'error' || item.status === 'missing' || verdict === 'failed' || counts.error > 0;
+      const logLink = Array.from(row.querySelectorAll('a')).find((link) => {
+        const href = link.getAttribute('href') || '';
+        return href.includes('/logs/');
+      });
+      if (!logLink) return;
+      logLink.removeAttribute('target');
+      logLink.removeAttribute('rel');
+      logLink.setAttribute('href', item.log_text_url || ('/api/logs/' + item.job_id + '.txt'));
+      logLink.dataset.logUrl = item.log_text_url || ('/api/logs/' + item.job_id + '.txt');
+      logLink.dataset.logTitle = '检测日志 #' + (item.job_id || '');
+      logLink.classList.add('batch-link-button');
+      logLink.classList.toggle('log-btn-hot', hasIssue);
+      row.classList.toggle('batch-result-error', hasIssue);
+    });
+  }
+
+  function renderBatchCard(item, isBest) {
+    if (item.status !== 'done' || !item.report) {
+      const statusLabel = {
+        queued: '排队中',
+        running: '检测中',
+        error: '失败',
+        missing: '不存在',
+      }[item.status] || item.status || '等待中';
+      return `
+        <article class="batch-result-card ${item.status === 'error' || item.status === 'missing' ? 'batch-result-error' : ''}">
+          <div class="batch-card-top">
+            <h3>${escapeHtml(item.base_url || item.job_id)}</h3>
+            <span class="batch-card-badge">${escapeHtml(statusLabel)}</span>
+          </div>
+          <p class="batch-card-url">${escapeHtml(item.target_model || '')}</p>
+          ${item.error ? `<p class="batch-card-error">${escapeHtml(item.error)}</p>` : ''}
+          <div class="batch-card-links">
+            <a href="${item.log_url || ('/logs/' + item.job_id)}" target="_blank" rel="noopener">查看日志</a>
+          </div>
+        </article>
+      `;
+    }
+
+    const report = item.report;
+    const perf = batchPerformanceOf(report);
+    const counts = batchCounts(item.rows || []);
+    const score = Math.round(Number(report.total_score || 0));
+    const verdict = String(report.verdict || '');
+    return `
+      <article class="batch-result-card ${isBest ? 'batch-result-best' : ''}">
+        <div class="batch-card-top">
+          <h3>${escapeHtml(report.base_url || item.base_url || item.job_id)}</h3>
+          <span class="batch-card-badge">${isBest ? '最高分' : escapeHtml(verdict || 'done')}</span>
+        </div>
+        <p class="batch-card-url">${escapeHtml(report.target_model || item.target_model || '')}</p>
+        <div class="batch-score-line">
+          <strong>${score}</strong><span>/100</span>
+        </div>
+        <div class="batch-perf-grid">
+          <div class="batch-perf-item"><span>首 TOKEN</span><strong>${formatMs(perf.ttft_ms)}</strong></div>
+          <div class="batch-perf-item"><span>总耗时</span><strong>${formatMs(perf.total_latency_ms)}</strong></div>
+          <div class="batch-perf-item"><span>吞吐 T/S</span><strong>${formatTps(perf.tokens_per_second)}</strong></div>
+          <div class="batch-perf-item"><span>输入 TOKENS</span><strong>${formatCount(perf.input_tokens)}</strong></div>
+          <div class="batch-perf-item"><span>输出 TOKENS</span><strong>${formatCount(perf.output_tokens)}</strong></div>
+        </div>
+        <p class="batch-card-meta">${counts.pass} 通过 · ${counts.fail} 未通过 · ${counts.error} 异常 · ${counts.skip} 跳过</p>
+        <p class="batch-card-summary">${escapeHtml(report.summary || '')}</p>
+        <div class="batch-card-links">
+          <a href="${item.result_url}" target="_blank" rel="noopener">永久报告</a>
+          <a href="${item.log_url || ('/logs/' + item.job_id)}" target="_blank" rel="noopener">日志</a>
+          <a href="${item.json_url}" target="_blank" rel="noopener">JSON</a>
+          <a href="${item.image_url}" target="_blank" rel="noopener">JPG</a>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderBatchMetricRows(items, bestMetrics) {
+    const rows = [
+      ['首 TOKEN', (perf) => formatMs(perf.ttft_ms)],
+      ['总耗时', (perf) => formatMs(perf.total_latency_ms)],
+      ['吞吐 (T/S)', (perf) => formatTps(perf.tokens_per_second)],
+      ['输入 TOKENS', (perf) => formatCount(perf.input_tokens)],
+      ['输出 TOKENS', (perf) => formatCount(perf.output_tokens)],
+    ];
+    const keys = ['ttft_ms', 'total_latency_ms', 'tokens_per_second', 'input_tokens', 'output_tokens'];
+    return rows.map(([label, formatter], rowIndex) => `
+      <tr class="batch-metric-row">
+        <th>${escapeHtml(label)}</th>
+        ${items.map((item) => {
+          if (!item.report) return '<td class="batch-detector-muted">-</td>';
+          const perf = batchPerformanceOf(item.report);
+          const key = keys[rowIndex];
+          const isBest = isBestMetric(perf[key], bestMetrics && bestMetrics[key]);
+          return `<td class="${isBest ? 'batch-best-cell' : ''}"><strong>${formatter(perf)}</strong></td>`;
+        }).join('')}
+      </tr>
+    `).join('');
+  }
+
+  function renderBatchCheckCell(item, label) {
+    if (!item.report || !Array.isArray(item.rows)) {
+      return '<td class="batch-detector-muted">-</td>';
+    }
+    const found = item.rows.find((row) => row && row.label === label);
+    if (!found) return '<td class="batch-detector-muted">-</td>';
+    const css = String(found.css || 'muted');
+    const text = `${found.label_short || found.status || ''} ${Math.round(Number(found.score || 0))}`;
+    return `<td><span class="batch-detector-pill batch-detector-${escapeAttr(css)}">${escapeHtml(text)}</span></td>`;
+  }
+
+  function collectBatchLabels(items) {
+    const seen = new Set();
+    items.forEach((item) => {
+      (item.rows || []).forEach((row) => {
+        if (row && row.label) seen.add(row.label);
+      });
+    });
+    return Array.from(seen);
+  }
+
+  function batchCounts(rows) {
+    const counts = {pass: 0, fail: 0, error: 0, skip: 0};
+    rows.forEach((row) => {
+      const status = row.status === 'pass' ? 'pass'
+        : row.status === 'error' ? 'error'
+        : row.status === 'skip' ? 'skip'
+        : 'fail';
+      counts[status] += 1;
+    });
+    return counts;
+  }
+
+  function scoreOfBatchItem(item) {
+    return item && item.report ? Number(item.report.total_score || 0) : -1;
+  }
+
+  function bestBatchMetrics(items) {
+    return {
+      score: bestBatchValue(items, (item) => item.report ? Number(item.report.total_score || 0) : null, 'max'),
+      ttft_ms: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).ttft_ms : null, 'min'),
+      total_latency_ms: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).total_latency_ms : null, 'min'),
+      tokens_per_second: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).tokens_per_second : null, 'max'),
+      input_tokens: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).input_tokens : null, 'max'),
+      output_tokens: bestBatchValue(items, (item) => item.report ? batchPerformanceOf(item.report).output_tokens : null, 'max'),
+    };
+  }
+
+  function bestBatchValue(items, getter, direction) {
+    const values = items.map(getter).map(numberOrNull).filter((value) => value !== null);
+    if (!values.length) return null;
+    return direction === 'min' ? Math.min(...values) : Math.max(...values);
+  }
+
+  function isBestMetric(value, bestValue) {
+    const n = numberOrNull(value);
+    const best = numberOrNull(bestValue);
+    return n !== null && best !== null && Math.abs(n - best) < 0.000001;
+  }
+
+  function batchPerformanceOf(report) {
+    const perf = report.performance || {};
+    const usage = perf.usage || {};
+    const output = numberOrNull(usage.output_tokens);
+    const latency = numberOrNull(perf.total_latency_ms);
+    const reportedTps = numberOrNull(perf.tokens_per_second);
+    const computedTps = output !== null && output > 0 && latency !== null && latency > 0
+      ? output * 1000.0 / latency
+      : null;
+    return {
+      ttft_ms: numberOrNull(perf.ttft_ms),
+      total_latency_ms: latency,
+      tokens_per_second: reportedTps !== null ? reportedTps : computedTps,
+      input_tokens: numberOrNull(usage.input_tokens),
+      output_tokens: output,
+    };
+  }
+
+  function numberOrNull(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function formatCount(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return Math.round(n).toLocaleString('en-US');
+  }
+
+  function formatMs(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return Math.round(n).toLocaleString('en-US') + 'ms';
+  }
+
+  function formatTps(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return n.toFixed(1);
+  }
+
+  function downloadJson(filename, payload) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/`/g, '&#96;');
+  }
+
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      if (lastPayload) downloadJson('veridrop-batch-results.json', lastPayload);
+    });
+  }
+  if (shareBtn) {
+    shareBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(location.href);
+        const orig = shareBtn.textContent;
+        shareBtn.textContent = '已复制';
+        setTimeout(() => { shareBtn.textContent = orig; }, 1500);
+      } catch (_) {
+        shareBtn.textContent = '复制失败';
+      }
+    });
+  }
+  poll();
+})();
+
+(function () {
+  let backdrop = null;
+  let titleEl = null;
+  let bodyEl = null;
+  let rawLink = null;
+
+  document.querySelectorAll('a[href^="/logs/"]').forEach((link) => {
+    const href = link.getAttribute('href') || '';
+    const jobId = href.split('/').filter(Boolean).pop() || '';
+    link.dataset.logUrl = '/api/logs/' + jobId + '.txt';
+    link.dataset.logTitle = '检测日志 #' + jobId;
+    link.removeAttribute('target');
+    link.removeAttribute('rel');
+    if (document.querySelector('.score-fail, .form-error:not([hidden])')) {
+      link.classList.add('log-btn-hot');
+    }
+  });
+
+  function ensureModal() {
+    if (backdrop) return;
+    backdrop = document.createElement('div');
+    backdrop.className = 'log-modal-backdrop';
+    backdrop.hidden = true;
+    backdrop.innerHTML = `
+      <section class="log-modal" role="dialog" aria-modal="true" aria-labelledby="log-modal-title">
+        <div class="log-modal-head">
+          <h2 id="log-modal-title">检测日志</h2>
+          <div class="log-modal-actions">
+            <a class="btn btn-ghost log-modal-raw" href="#" target="_blank" rel="noopener">原始日志</a>
+            <button class="btn btn-ghost log-modal-close" type="button" aria-label="关闭">关闭</button>
+          </div>
+        </div>
+        <pre class="log-modal-body"></pre>
+      </section>
+    `;
+    document.body.appendChild(backdrop);
+    titleEl = backdrop.querySelector('#log-modal-title');
+    bodyEl = backdrop.querySelector('.log-modal-body');
+    rawLink = backdrop.querySelector('.log-modal-raw');
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop || event.target.closest('.log-modal-close')) closeModal();
+    });
+  }
+
+  function openModal(title, url) {
+    ensureModal();
+    titleEl.textContent = title || '检测日志';
+    bodyEl.textContent = '正在加载日志...';
+    rawLink.href = url;
+    backdrop.hidden = false;
+    document.body.classList.add('log-modal-open');
+  }
+
+  function closeModal() {
+    if (!backdrop) return;
+    backdrop.hidden = true;
+    document.body.classList.remove('log-modal-open');
+  }
+
+  document.addEventListener('click', async (event) => {
+    const trigger = event.target.closest('[data-log-url]');
+    if (!trigger) return;
+    event.preventDefault();
+    const url = trigger.dataset.logUrl;
+    if (!url) return;
+    openModal(trigger.dataset.logTitle || trigger.textContent || '检测日志', url);
+    try {
+      const response = await fetch(url, {cache: 'no-store'});
+      const text = await response.text();
+      if (!response.ok) throw new Error(text || ('HTTP ' + response.status));
+      bodyEl.textContent = text || '暂无日志';
+    } catch (error) {
+      bodyEl.textContent = '日志加载失败: ' + (error && error.message ? error.message : String(error));
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeModal();
+  });
+})();
+
+(function () {
+  const protocol =
+    location.pathname.startsWith('/claude') ? 'anthropic' :
+    location.pathname.startsWith('/openai') ? 'openai' :
+    location.pathname.startsWith('/gemini') ? 'gemini' : null;
+  if (!protocol) return;
+
+  const form = document.getElementById('detect-form');
+  if (form && form.dataset.batch === 'true') return;
 
   const protoLabel = {anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini'}[protocol];
   const protoPath = {anthropic: '/claude', openai: '/openai', gemini: '/gemini'};
@@ -409,6 +1606,10 @@
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
+    if (form.dataset.batch === 'true' && window.veridropRunBatch) {
+      await window.veridropRunBatch();
+      return;
+    }
     errBox.hidden = true;
     errBox.classList.remove('form-error-rich');
     submitBtn.disabled = true;

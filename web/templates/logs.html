@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}检测日志 #{{ job_id }} - Veridrop{% endblock %}
+{% block description %}Veridrop 检测任务日志。{% endblock %}
+
+{% block content %}
+<section class="result-head">
+  <div>
+    <h1>检测日志</h1>
+    <p class="muted">
+      任务:<code>{{ job_id }}</code>
+      {% if job %}
+      · 模型:<code>{{ job.target_model }}</code>
+      · 中转站:<code>{{ job.base_url }}</code>
+      {% endif %}
+    </p>
+  </div>
+  <div class="result-actions">
+    <a class="btn btn-ghost" href="/api/logs/{{ job_id }}.txt" target="_blank" rel="noopener">原始日志</a>
+    <a class="btn btn-ghost" href="/r/{{ job_id }}">检测报告</a>
+  </div>
+</section>
+
+<section class="card log-card">
+  <pre class="job-log">{{ log_text }}</pre>
+</section>
+{% endblock %}
