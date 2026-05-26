@@ -74,7 +74,13 @@
     <a class="btn btn-ghost" href="/r/{{ job_id }}.jpg" download="veridrop-{{ job_id }}.jpg">
       下载 JPG
     </a>
-    <a class="btn btn-ghost" href="/logs/{{ job_id }}">查看日志</a>
+    <button
+      class="btn btn-ghost"
+      type="button"
+      data-log-url="/api/logs/{{ job_id }}.txt"
+      data-log-title="检测日志 #{{ job_id }}">
+      查看日志
+    </button>
     <button class="btn btn-ghost" id="share-btn" type="button">分享</button>
   </div>
 </section>
@@ -218,6 +224,22 @@
       <dd>比较同一 prompt 的 <code>generateContent</code> 与 <code>streamGenerateContent</code> 文本、结束原因和用量字段是否一致。</dd>
       <dt>Token 用量</dt>
       <dd>检查 <code>usageMetadata</code> 是否存在、Token 统计是否自洽,以及长短文本带来的 Token 增量是否合理。</dd>
+    </dl>
+    {% elif protocol == 'deepseek' %}
+    <summary>DeepSeek 检测项各自检查什么?</summary>
+    <dl class="def-list">
+      <dt>基础请求 (Basic Request)</dt>
+      <dd>发送最小 Chat Completions 请求,确认接口可用且能提取 assistant 文本。</dd>
+      <dt>模型一致性 (Model Consistency)</dt>
+      <dd>验证 <code>response.model</code> 与请求的 <code>deepseek-v4-pro</code> / <code>deepseek-v4-flash</code> 匹配。</dd>
+      <dt>SSE / usage</dt>
+      <dd>开启 <code>stream_options.include_usage</code>,检查流式分片、<code>[DONE]</code>、finish_reason、usage 和缓存 token 字段是否完整。</dd>
+      <dt>函数调用 (tool_calls)</dt>
+      <dd>强制 tool_choice,验证 <code>call_</code> ID、<code>type=function</code>、函数名和 arguments JSON。</dd>
+      <dt>协议规范性 (Protocol)</dt>
+      <dd>被动检查 <code>chatcmpl-</code> ID、<code>chat.completion</code>、choices、finish_reason、usage 等 OpenAI 兼容字段。</dd>
+      <dt>长上下文真实性 (Long Context)</dt>
+      <dd>需在提交时勾选启用 — 用 needle-in-haystack 在 32k → 100k tokens 等档位探针,验证中转站是否真兑现上下文窗口。</dd>
     </dl>
     {% else %}
     <summary>12 项检测各自检查什么?</summary>

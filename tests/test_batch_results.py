@@ -44,7 +44,7 @@ def test_batch_page_and_results_reuse_result_rows(tmp_path: Path, monkeypatch):
     client = TestClient(app)
     page = client.get("/batch?ids=job123")
     assert page.status_code == 200
-    assert "20260525-loadtest" in page.text
+    assert "20260526-deepseek" in page.text
     assert 'id="batch-share-btn"' in page.text
     assert "OpenAI 检测项各自检查什么?" in page.text
 

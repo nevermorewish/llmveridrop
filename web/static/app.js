@@ -114,7 +114,8 @@
   const protocol =
     location.pathname.startsWith('/claude') ? 'anthropic' :
     location.pathname.startsWith('/openai') ? 'openai' :
-    location.pathname.startsWith('/gemini') ? 'gemini' : null;
+    location.pathname.startsWith('/gemini') ? 'gemini' :
+    location.pathname.startsWith('/deepseek') ? 'deepseek' : null;
   if (!protocol) return;
 
   const baseUrlInput = document.getElementById('base_url');
@@ -136,6 +137,7 @@
     anthropic: 'Claude',
     openai: 'OpenAI',
     gemini: 'Gemini',
+    deepseek: 'DeepSeek',
   }[protocol];
   submitBtn.textContent = '开始批量检测';
 
@@ -354,7 +356,8 @@
     return form.getAttribute('data-endpoint')
       || (protocol === 'anthropic' ? '/api/detect/claude'
         : protocol === 'openai' ? '/api/detect/openai'
-        : '/api/detect/gemini');
+        : protocol === 'gemini' ? '/api/detect/gemini'
+        : '/api/detect/deepseek');
   }
 
   async function submitOne(item) {
@@ -1472,14 +1475,15 @@
   const protocol =
     location.pathname.startsWith('/claude') ? 'anthropic' :
     location.pathname.startsWith('/openai') ? 'openai' :
-    location.pathname.startsWith('/gemini') ? 'gemini' : null;
+    location.pathname.startsWith('/gemini') ? 'gemini' :
+    location.pathname.startsWith('/deepseek') ? 'deepseek' : null;
   if (!protocol) return;
 
   const form = document.getElementById('detect-form');
   if (form && form.dataset.batch === 'true') return;
 
-  const protoLabel = {anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini'}[protocol];
-  const protoPath = {anthropic: '/claude', openai: '/openai', gemini: '/gemini'};
+  const protoLabel = {anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek'}[protocol];
+  const protoPath = {anthropic: '/claude', openai: '/openai', gemini: '/gemini', deepseek: '/deepseek'};
 
   const baseUrlInput = document.getElementById('base_url');
   const apiKeyInput = document.getElementById('api_key');
@@ -1565,7 +1569,7 @@
       if (others.length) {
         html += '<div class="probe-actions">';
         others.forEach((o) => {
-          const label = {anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini'}[o.proto];
+          const label = {anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek'}[o.proto];
           html +=
             '<button type="button" class="btn btn-ghost probe-action" data-handoff="' + o.proto + '">' +
             '改用 ' + label + ' 协议 (' + o.count + ' 个可用)</button>';
@@ -1670,7 +1674,7 @@
       if (data && data.base_url && data.api_key) {
         baseUrlInput.value = data.base_url;
         apiKeyInput.value = data.api_key;
-        const fromLabel = {anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini'}[data.from] || data.from;
+        const fromLabel = {anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek'}[data.from] || data.from;
         setPill('neutral', '🔄 已从 ' + fromLabel + ' 页面带入凭据,正在重新探测...');
         // Defer so the page paints first
         setTimeout(runProbe, 50);
@@ -1694,13 +1698,16 @@
         ? '/api/detect/openai'
         : location.pathname.startsWith('/gemini')
         ? '/api/detect/gemini'
+        : location.pathname.startsWith('/deepseek')
+        ? '/api/detect/deepseek'
         : '/api/detect');
   }
 
   function currentProtocol() {
     return location.pathname.startsWith('/claude') ? 'anthropic' :
            location.pathname.startsWith('/openai') ? 'openai' :
-           location.pathname.startsWith('/gemini') ? 'gemini' : null;
+           location.pathname.startsWith('/gemini') ? 'gemini' :
+           location.pathname.startsWith('/deepseek') ? 'deepseek' : null;
   }
 
   function renderModelDeadError(detail) {

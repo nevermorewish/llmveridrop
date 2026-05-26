@@ -13,6 +13,7 @@ def test_explicit_protocol_arg():
     assert _resolve_protocol("anthropic", "irrelevant") == Protocol.ANTHROPIC
     assert _resolve_protocol("openai", "irrelevant") == Protocol.OPENAI
     assert _resolve_protocol("gemini", "irrelevant") == Protocol.GEMINI
+    assert _resolve_protocol("deepseek", "irrelevant") == Protocol.DEEPSEEK
 
 
 def test_explicit_protocol_arg_case_insensitive():
@@ -46,6 +47,12 @@ def test_auto_detect_gemini_models():
     assert _resolve_protocol(None, "models/gemini-1.5-pro") == Protocol.GEMINI
 
 
+def test_auto_detect_deepseek_models():
+    assert _resolve_protocol(None, "deepseek-v4-pro") == Protocol.DEEPSEEK
+    assert _resolve_protocol(None, "deepseek-v4-flash") == Protocol.DEEPSEEK
+    assert _resolve_protocol(None, "models/deepseek-v4-pro") == Protocol.DEEPSEEK
+
+
 def test_auto_detect_unknown_falls_back_to_anthropic():
     """Unknown / legacy aliases don't crash; fall back to anthropic which
     is the historical default for relay-detector."""
@@ -58,3 +65,4 @@ def test_explicit_overrides_heuristic():
     explicit wins. Catches relays that route claude-X to GPT for testing."""
     assert _resolve_protocol("openai", "claude-haiku-4-5") == Protocol.OPENAI
     assert _resolve_protocol("anthropic", "gpt-4o") == Protocol.ANTHROPIC
+    assert _resolve_protocol("openai", "deepseek-v4-pro") == Protocol.OPENAI

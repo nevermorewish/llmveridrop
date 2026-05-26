@@ -19,6 +19,7 @@ class Protocol(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GEMINI = "gemini"
+    DEEPSEEK = "deepseek"
 
 
 class DetectionTier(str, Enum):

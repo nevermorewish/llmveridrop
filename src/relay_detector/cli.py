@@ -183,15 +183,15 @@ def detect(
         None, "--base-url", envvar="ANTHROPIC_BASE_URL",
         help=(
             "Relay station base URL. Reads ANTHROPIC_BASE_URL; "
-            "for --protocol openai/gemini also falls back to "
-            "OPENAI_BASE_URL / GEMINI_BASE_URL or each protocol's official endpoint."
+            "for --protocol openai/gemini/deepseek also falls back to "
+            "OPENAI_BASE_URL / GEMINI_BASE_URL / DEEPSEEK_BASE_URL or each protocol's official endpoint."
         ),
     ),
     api_key: str = typer.Option(
         None, "--api-key", envvar="ANTHROPIC_API_KEY",
         help=(
             "API key. Reads ANTHROPIC_API_KEY by default; for non-anthropic "
-            "protocols falls back to OPENAI_API_KEY / GEMINI_API_KEY."
+            "protocols falls back to OPENAI_API_KEY / GEMINI_API_KEY / DEEPSEEK_API_KEY."
         ),
     ),
     model: str = typer.Option(
@@ -207,8 +207,8 @@ def detect(
     protocol: Optional[str] = typer.Option(
         None, "--protocol",
         help=(
-            "anthropic / openai / gemini. Auto-detected from model name "
-            "(claude* → anthropic, gpt*/o1/o3 → openai, gemini* → gemini) "
+            "anthropic / openai / gemini / deepseek. Auto-detected from model name "
+            "(claude* -> anthropic, gpt*/o1/o3 -> openai, gemini* -> gemini, deepseek* -> deepseek) "
             "if omitted."
         ),
     ),
@@ -287,6 +287,7 @@ def detect(
 _DEFAULT_BASE_URLS = {
     Protocol.OPENAI: "https://api.openai.com/v1",
     Protocol.GEMINI: "https://generativelanguage.googleapis.com/v1beta/openai",
+    Protocol.DEEPSEEK: "https://api.deepseek.com/v1",
     # Anthropic intentionally has no default — the official endpoint requires
     # an Anthropic key, which most relay-detector users won't have. Forcing
     # an explicit --base-url avoids accidentally probing api.anthropic.com
@@ -302,7 +303,7 @@ def _resolve_protocol(protocol_arg: Optional[str], model: str) -> Protocol:
         except ValueError:
             console.print(
                 f"[red]error:[/red] unknown protocol '{protocol_arg}' "
-                "(expected anthropic / openai / gemini)"
+                "(expected anthropic / openai / gemini / deepseek)"
             )
             raise typer.Exit(2)
     # Heuristic by model id prefix — matches web/server.py:_protocol_from_model.
@@ -313,6 +314,8 @@ def _resolve_protocol(protocol_arg: Optional[str], model: str) -> Protocol:
         return Protocol.OPENAI
     if s.startswith("gemini"):
         return Protocol.GEMINI
+    if s.startswith("deepseek"):
+        return Protocol.DEEPSEEK
     return Protocol.ANTHROPIC  # fallback for unknown / legacy aliases
 
 
@@ -341,6 +344,15 @@ _PROTOCOL_TIERS = {
             "本检测通过 OpenAI 兼容协议 (POST /chat/completions) 探测 "
             "Gemini 中转站,验证响应字段、tool 调用、结构化输出、流式一致性"
             "和 usage 字段是否符合 OpenAI 规范。它不提供加密级模型真伪证明。"
+        ),
+    ),
+    Protocol.DEEPSEEK: (
+        DetectionTier.PROTOCOL,
+        "DeepSeek 协议级验证",
+        (
+            "本检测通过 OpenAI 兼容协议验证 deepseek-v4-pro / deepseek-v4-flash "
+            "中转站的 Chat Completions、SSE、usage、tool_calls 和上下文窗口表现。"
+            "它不提供加密级模型真伪证明。"
         ),
     ),
 }
@@ -378,6 +390,12 @@ async def _run_detect(
         )
     elif protocol == Protocol.GEMINI:
         from .protocols.gemini import (
+            build_detectors,
+            build_runner,
+            make_client,
+        )
+    elif protocol == Protocol.DEEPSEEK:
+        from .protocols.deepseek import (
             build_detectors,
             build_runner,
             make_client,

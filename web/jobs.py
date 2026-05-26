@@ -179,6 +179,7 @@ def log_candidates(job_id: str) -> list[Path]:
         JOBS_DIR / "anthropic" / f"{job_id}.log",
         JOBS_DIR / "openai" / f"{job_id}.log",
         JOBS_DIR / "gemini" / f"{job_id}.log",
+        JOBS_DIR / "deepseek" / f"{job_id}.log",
     ]
 
 
@@ -198,6 +199,7 @@ def _report_candidates(job_id: str) -> list[Path]:
         JOBS_DIR / "anthropic" / f"{job_id}.json",
         JOBS_DIR / "openai" / f"{job_id}.json",
         JOBS_DIR / "gemini" / f"{job_id}.json",
+        JOBS_DIR / "deepseek" / f"{job_id}.json",
     ]
 
 
@@ -264,6 +266,17 @@ async def _run(
                 tier_message = (
                     "本检测通过 OpenAI 兼容协议 (POST /chat/completions) 探测 Gemini 中转站，"
                     "验证响应字段、tool 调用、结构化输出、流式一致性和 usage 字段是否符合 OpenAI 规范。"
+                    "它不提供加密级模型真伪证明。"
+                )
+            elif protocol == "deepseek":
+                append_log(job_id, protocol, "running deepseek detectors")
+                outcome = await _run_deepseek(base_url, api_key, model, cfg)
+                report_protocol = Protocol.DEEPSEEK
+                report_tier = DetectionTier.PROTOCOL
+                tier_title = "DeepSeek 协议级验证"
+                tier_message = (
+                    "本检测通过 OpenAI 兼容协议验证 deepseek-v4-pro / deepseek-v4-flash "
+                    "中转站的 Chat Completions、SSE、usage、tool_calls 和上下文窗口表现。"
                     "它不提供加密级模型真伪证明。"
                 )
             elif protocol == "anthropic":
@@ -399,6 +412,23 @@ async def _run_gemini(
     cfg: ExecutionConfig,
 ):
     from relay_detector.protocols.gemini import (
+        build_detectors,
+        build_runner,
+        make_client,
+    )
+
+    async with make_client(base_url, api_key, timeout=cfg.request_timeout_s) as client:
+        runner = build_runner(client, build_detectors(cfg.mode), cfg)
+        return await runner.run(model)
+
+
+async def _run_deepseek(
+    base_url: str,
+    api_key: str,
+    model: str,
+    cfg: ExecutionConfig,
+):
+    from relay_detector.protocols.deepseek import (
         build_detectors,
         build_runner,
         make_client,

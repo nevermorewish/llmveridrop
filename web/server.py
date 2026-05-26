@@ -68,6 +68,8 @@ def _protocol_from_model(model: str) -> str:
     normalized = model.strip().lower()
     if normalized.startswith(("gemini-", "models/gemini-")):
         return "gemini"
+    if normalized.startswith(("deepseek-", "models/deepseek-")):
+        return "deepseek"
     if normalized.startswith(("gpt-", "o1", "o3", "o4")):
         return "openai"
     return "anthropic"
@@ -104,6 +106,12 @@ def _gemini_model_choices() -> list[dict[str, str]]:
     return [{"id": s, "label": s} for s in model_choices()]
 
 
+def _deepseek_model_choices() -> list[dict[str, str]]:
+    from relay_detector.protocols.deepseek import model_choices
+
+    return [{"id": s, "label": s} for s in model_choices()]
+
+
 @app.get("/", response_class=HTMLResponse)
 async def hub(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "hub.html")
@@ -132,6 +140,15 @@ async def gemini_index(request: Request) -> HTMLResponse:
         request,
         "gemini.html",
         {"models": _gemini_model_choices()},
+    )
+
+
+@app.get("/deepseek", response_class=HTMLResponse)
+async def deepseek_index(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "deepseek.html",
+        {"models": _deepseek_model_choices()},
     )
 
 
@@ -428,6 +445,11 @@ async def api_detect_claude(
             status_code=400,
             detail="这是 OpenAI 模型,请在 /openai 页面提交检测。",
         )
+    elif _protocol_from_model(model) == "deepseek":
+        raise HTTPException(
+            status_code=400,
+            detail="这是 DeepSeek 模型,请在 /deepseek 页面提交检测。",
+        )
 
     await _preflight_or_422(request, base_url, api_key, model, "anthropic")
     job_id = await jobs.submit(
@@ -498,6 +520,48 @@ async def api_detect_gemini(
 
     await _preflight_or_422(request, base_url, api_key, model, "gemini")
     job_id = await jobs.submit(base_url, api_key, model, mode, protocol="gemini")
+    return JSONResponse({"job_id": job_id, "status_url": f"/api/status/{job_id}"})
+
+
+@app.post("/api/detect/deepseek")
+async def api_detect_deepseek(
+    request: Request,
+    base_url: str = Form(...),
+    api_key: str = Form(...),
+    model: str = Form(...),
+    mode: str = Form("standard"),
+    include_long_context: bool = Form(False),
+    include_long_context_extreme: bool = Form(False),
+) -> JSONResponse:
+    from relay_detector.protocols.deepseek.config import is_supported_model
+
+    base_url = base_url.strip()
+    api_key = api_key.strip()
+    model = model.strip()
+    mode = mode.strip().lower()
+
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="base_url must start with http(s)://")
+    if not api_key or len(api_key) < 8:
+        raise HTTPException(status_code=400, detail="api_key looks invalid")
+    if not is_supported_model(model):
+        raise HTTPException(
+            status_code=400,
+            detail="DeepSeek 检测只支持 deepseek-v4-pro 和 deepseek-v4-flash。",
+        )
+    if mode not in _VALID_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {_VALID_MODES}")
+
+    await _preflight_or_422(request, base_url, api_key, model, "deepseek")
+    job_id = await jobs.submit(
+        base_url,
+        api_key,
+        model,
+        mode,
+        protocol="deepseek",
+        include_long_context=include_long_context,
+        include_long_context_extreme=include_long_context_extreme,
+    )
     return JSONResponse({"job_id": job_id, "status_url": f"/api/status/{job_id}"})
 
 
@@ -646,6 +710,7 @@ async def batch_page(request: Request, ids: str = "") -> HTMLResponse:
             "anthropic": "claude",
             "openai": "openai",
             "gemini": "gemini",
+            "deepseek": "deepseek",
         }.get(first.protocol, "claude")
     return templates.TemplateResponse(
         request,
@@ -654,7 +719,12 @@ async def batch_page(request: Request, ids: str = "") -> HTMLResponse:
     )
 
 
-_PROTOCOL_LABELS = {"anthropic": "Claude", "openai": "OpenAI", "gemini": "Gemini"}
+_PROTOCOL_LABELS = {
+    "anthropic": "Claude",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
+    "deepseek": "DeepSeek",
+}
 _VERDICT_LABELS = {"passed": "通过", "marginal": "存在风险", "failed": "未达标"}
 
 
@@ -673,6 +743,7 @@ def _job_log_text(job_id: str) -> str | None:
         jobs.JOBS_DIR / "anthropic" / f"{job_id}.json",
         jobs.JOBS_DIR / "openai" / f"{job_id}.json",
         jobs.JOBS_DIR / "gemini" / f"{job_id}.json",
+        jobs.JOBS_DIR / "deepseek" / f"{job_id}.json",
     ):
         if not path.exists():
             continue
@@ -816,6 +887,7 @@ _STATIC_SITEMAP_URLS = [
     ("https://veridrop.org/claude",      "weekly",  "0.9",  "index.html"),
     ("https://veridrop.org/openai",      "weekly",  "0.9",  "openai.html"),
     ("https://veridrop.org/gemini",      "weekly",  "0.9",  "gemini.html"),
+    ("https://veridrop.org/deepseek",    "weekly",  "0.9",  "deepseek.html"),
     ("https://veridrop.org/leaderboard", "daily",   "0.85", "leaderboard.html"),
     ("https://veridrop.org/faq",         "monthly", "0.8",  "faq.html"),
 ]
@@ -824,6 +896,7 @@ _SITEMAP_REPORT_DIRS = [
     Path("/opt/veridrop/web_data/jobs/anthropic"),
     Path("/opt/veridrop/web_data/jobs/openai"),
     Path("/opt/veridrop/web_data/jobs/gemini"),
+    Path("/opt/veridrop/web_data/jobs/deepseek"),
     Path("/opt/veridrop/web_data/jobs"),  # legacy top-level
 ]
 
@@ -949,6 +1022,14 @@ _DETECTOR_DISPLAY = {
         ("integrity", "流式一致性"),
         ("token_usage", "Token 用量"),
     ],
+    "deepseek": [
+        ("basic_request", "基础请求"),
+        ("model_consistency", "模型一致性"),
+        ("protocol", "协议规范性"),
+        ("sse_usage", "SSE / usage"),
+        ("function_calling", "函数调用"),
+        ("long_context", "长上下文真实性"),
+    ],
 }
 
 
@@ -1051,6 +1132,8 @@ def _report_notes(report: dict) -> list[dict[str, str]]:
     terms a non-implementer can act on.
     """
     protocol = str(report.get("protocol") or "anthropic")
+    if protocol == "deepseek":
+        return _deepseek_report_notes(report)
     if protocol == "gemini":
         return _gemini_report_notes(report)
     if protocol == "anthropic":
@@ -1240,6 +1323,51 @@ def _gemini_report_notes(report: dict) -> list[dict[str, str]]:
             "body": (
                 "基础请求、模型字段、tool 调用、结构化输出、流式响应和 Token 用量字段基本符合 "
                 "OpenAI Chat Completions 规范。"
+            ),
+        })
+    return notes
+
+
+def _deepseek_report_notes(report: dict) -> list[dict[str, str]]:
+    results = {
+        r.get("name"): r for r in report.get("results") or []
+        if isinstance(r, dict)
+    }
+    notes: list[dict[str, str]] = []
+
+    sse_usage = results.get("sse_usage") or {}
+    sd = (
+        sse_usage.get("details")
+        if isinstance(sse_usage.get("details"), dict)
+        else {}
+    )
+    if sse_usage and sse_usage.get("status") != "pass":
+        notes.append({
+            "title": "SSE / usage 兼容性存在风险",
+            "body": (
+                "DeepSeek OpenAI 兼容接口应支持流式分片、[DONE] 结束标记以及 "
+                "stream_options.include_usage 返回 usage。"
+                f"本次 usage_ok={sd.get('usage_ok')}, done_seen={sd.get('done_seen')}, "
+                f"parse_errors={sd.get('parse_errors')}。"
+            ),
+        })
+
+    function_calling = results.get("function_calling") or {}
+    if function_calling and function_calling.get("status") != "pass":
+        notes.append({
+            "title": "tool_calls 兼容性存在风险",
+            "body": (
+                "强制 tool_choice 后未返回完整的 OpenAI 兼容 tool_calls 结构。"
+                "这类中转站在使用函数调用、Agent 或工具编排时可能不稳定。"
+            ),
+        })
+
+    if not notes:
+        notes.append({
+            "title": "DeepSeek OpenAI 兼容协议表现良好",
+            "body": (
+                "基础请求、模型字段、SSE usage、tool_calls 和上下文相关检测基本符合 "
+                "deepseek-v4-pro / deepseek-v4-flash 的中转站检测预期。"
             ),
         })
     return notes

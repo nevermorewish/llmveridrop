@@ -123,6 +123,10 @@ _MODEL_CONTEXT_LIMITS = {
     "gemini-2.5-pro":   1_048_576,
     "gemini-1.5-flash": 1_048_576,
     "gemini-1.5-pro":   1_048_576,
+    # DeepSeek V4 relays commonly advertise 128k-class OpenAI-compatible
+    # context. Keep conservative until official per-model limits are stable.
+    "deepseek-v4-pro":   128_000,
+    "deepseek-v4-flash": 128_000,
 }
 
 

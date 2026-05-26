@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block title %}DeepSeek API 中转站检测 · V4 Pro / V4 Flash 协议验证 | Veridrop{% endblock %}
+{% block description %}检测 DeepSeek V4 Pro / V4 Flash 中转站的 OpenAI 兼容协议、SSE、usage、tool_calls 和上下文窗口能力。{% endblock %}
+{% block og_title %}DeepSeek API 中转站检测 · V4 Pro / V4 Flash{% endblock %}
+{% block og_description %}验证 DeepSeek 中转站是否正确支持 Chat Completions、SSE streaming usage、tool_calls 和上下文。{% endblock %}
+{% block canonical %}https://veridrop.org/deepseek{% endblock %}
+{% block og_url %}https://veridrop.org/deepseek{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <h1>DeepSeek API 中转站检测</h1>
+  <p class="hero-sub answer-capsule" style="text-align:center;max-width:760px;margin:0 auto 14px;">
+    检测 <strong>deepseek-v4-pro</strong> 和 <strong>deepseek-v4-flash</strong> 中转站的 OpenAI 兼容协议实现：
+    Chat Completions、SSE 流式输出、<code>usage</code>、<code>tool_calls</code> 和可选上下文窗口探测。
+  </p>
+</section>
+
+<section class="card alert-card">
+  <strong>协议级验证</strong>
+  本检测只开放 deepseek-v4-pro / deepseek-v4-flash 两个模型，重点检查中转站是否正确透传
+  DeepSeek 的 OpenAI-compatible 响应形状、流式 usage、工具调用和上下文能力；不提供加密级模型真伪证明。
+</section>
+
+<section class="card form-card">
+  <form id="detect-form" data-endpoint="/api/detect/deepseek" autocomplete="off">
+    <div class="field">
+      <label for="base_url">中转站接口地址</label>
+      <input type="url" id="base_url" name="base_url" required
+             placeholder="https://api.deepseek.com/v1" />
+      <p class="hint">填写 OpenAI-compatible 根 URL，例如 <code>https://api.example.com/v1</code>。</p>
+    </div>
+
+    <div class="field">
+      <label for="api_key">API 密钥</label>
+      <input type="password" id="api_key" name="api_key" required
+             placeholder="sk-..." minlength="8" />
+      <p class="hint">仅用于本次检测，不写入报告、不持久化。</p>
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="model">目标模型</label>
+        <div class="combo">
+          <input type="text" id="model" name="model" required
+                 value="deepseek-v4-pro" autocomplete="off"
+                 placeholder="deepseek-v4-pro"
+                 maxlength="200" />
+          <ul class="combo-list" id="model-list" hidden>
+            {% for m in models %}
+            <li class="combo-item" data-value="{{ m.id }}">{{ m.label }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+        <p class="hint">当前仅支持 <code>deepseek-v4-pro</code> 和 <code>deepseek-v4-flash</code>。</p>
+      </div>
+      <div class="field">
+        <label for="mode">检测深度</label>
+        <select id="mode" name="mode">
+          <option value="quick">快速 (~15 秒: basic / protocol / SSE usage)</option>
+          <option value="standard" selected>标准 (~45 秒: + model / tool_calls)</option>
+          <option value="full">完整 (~70 秒: + 可选上下文)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field-checkbox">
+      <input type="checkbox" id="include_long_context" name="include_long_context" value="true" />
+      <label for="include_long_context">
+        <strong>深度检测: 上下文窗口真实性</strong>
+        <span class="checkbox-hint">
+          额外发送 32k / 100k / 200k needle-in-haystack 探针，验证中转站是否截断或路由到小窗口模型。
+          <strong>会增加 API token 消耗。</strong>
+        </span>
+      </label>
+    </div>
+
+    <div class="field-checkbox">
+      <input type="checkbox" id="include_long_context_extreme" name="include_long_context_extreme" value="true" />
+      <label for="include_long_context_extreme">
+        <strong>极限检测: 模型完整 context</strong>
+        <span class="checkbox-hint">
+          按模型上下文上限自适应探测。成本和耗时更高，适合验证高价中转站是否兑现宣传窗口。
+        </span>
+      </label>
+    </div>
+
+    <button type="submit" id="submit-btn" class="btn btn-primary">
+      开始检测
+    </button>
+    <p class="form-error" id="form-error" hidden></p>
+  </form>
+</section>
+
+<section class="features">
+  <div class="feature">
+    <h3>SSE / usage</h3>
+    <p>发送 <code>stream_options.include_usage=true</code>，检查流式 final usage、token 统计和 cache 字段是否透传。</p>
+  </div>
+  <div class="feature">
+    <h3>tool_calls</h3>
+    <p>强制函数调用，验证 <code>tool_calls[].function.arguments</code> 是否是合法 JSON，避免文本伪工具调用。</p>
+  </div>
+  <div class="feature">
+    <h3>上下文窗口</h3>
+    <p>可选 needle-in-haystack 长上下文探测，识别静默截断或路由到小窗口后端。</p>
+  </div>
+</section>
+{% endblock %}

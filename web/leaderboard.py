@@ -24,10 +24,16 @@ REPORT_DIRS = [
     Path("/opt/veridrop/web_data/jobs/anthropic"),
     Path("/opt/veridrop/web_data/jobs/openai"),
     Path("/opt/veridrop/web_data/jobs/gemini"),
+    Path("/opt/veridrop/web_data/jobs/deepseek"),
     Path("/opt/veridrop/web_data/jobs"),  # legacy top-level
 ]
 
-PROTOCOL_LABELS = {"anthropic": "Claude", "openai": "OpenAI", "gemini": "Gemini"}
+PROTOCOL_LABELS = {
+    "anthropic": "Claude",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
+    "deepseek": "DeepSeek",
+}
 VERDICT_LABELS = {"passed": "通过", "marginal": "存在风险", "failed": "未达标"}
 
 # A domain with only 1 detection is statistically meaningless for ranking.

@@ -48,9 +48,14 @@ def test_classify_gemini_aliases():
 
 def test_classify_unknown_returns_none():
     assert _classify("llama-3-70b") is None
-    assert _classify("deepseek-v3") is None
     assert _classify("") is None
     assert _classify(None) is None  # type: ignore[arg-type]
+
+
+def test_classify_deepseek_aliases():
+    assert _classify("deepseek-v4-pro") == "deepseek"
+    assert _classify("deepseek-v4-flash") == "deepseek"
+    assert _classify("models/deepseek-v4-pro") == "deepseek"
 
 
 # ---- _extract_model_ids --------------------------------------------------
@@ -133,6 +138,7 @@ async def test_probe_happy_path_classifies_all_buckets(monkeypatch):
             {"id": "gpt-4o-mini"},
             {"id": "gpt-5"},
             {"id": "gemini-3-flash-preview"},
+            {"id": "deepseek-v4-pro"},
             {"id": "llama-3-70b"},  # unrecognised — must not be bucketed
         ]})
 
@@ -141,17 +147,19 @@ async def test_probe_happy_path_classifies_all_buckets(monkeypatch):
 
     assert out["ok"] is True
     assert out["models_endpoint_supported"] is True
-    assert out["raw_count"] == 6
+    assert out["raw_count"] == 7
     assert sorted(out["by_protocol"]["anthropic"]) == [
         "claude-haiku-4-5-20251001", "claude-opus-4-6",
     ]
     assert sorted(out["by_protocol"]["openai"]) == ["gpt-4o-mini", "gpt-5"]
     assert out["by_protocol"]["gemini"] == ["gemini-3-flash-preview"]
+    assert out["by_protocol"]["deepseek"] == ["deepseek-v4-pro"]
     # unrecognised model not in any bucket
     assert "llama-3-70b" not in (
         out["by_protocol"]["anthropic"]
         + out["by_protocol"]["openai"]
         + out["by_protocol"]["gemini"]
+        + out["by_protocol"]["deepseek"]
     )
 
     # request shape: hit /v1/models with both Bearer + x-api-key headers.
@@ -338,7 +346,7 @@ async def test_probe_cache_isolated_by_api_key(monkeypatch):
 
 
 def test_protocols_constant_matches_buckets_in_response():
-    assert set(PROTOCOLS) == {"anthropic", "openai", "gemini"}
+    assert set(PROTOCOLS) == {"anthropic", "openai", "gemini", "deepseek"}
 
 
 # ---- best_by_protocol --------------------------------------------------
@@ -356,6 +364,7 @@ async def test_probe_picks_protocol_preferred_default(monkeypatch):
             {"id": "gpt-4o"},
             {"id": "gpt-4o-mini"},        # but THIS is the preferred pick
             {"id": "gemini-2.5-flash"},
+            {"id": "deepseek-v4-flash"},
             {"id": "claude-haiku-4-5-20251001"},
             {"id": "claude-opus-4-7"},
         ]})
@@ -365,6 +374,7 @@ async def test_probe_picks_protocol_preferred_default(monkeypatch):
 
     assert out["best_by_protocol"]["openai"] == "gpt-4o-mini"
     assert out["best_by_protocol"]["gemini"] == "gemini-2.5-flash"
+    assert out["best_by_protocol"]["deepseek"] == "deepseek-v4-flash"
     assert out["best_by_protocol"]["anthropic"] == "claude-haiku-4-5-20251001"
 
 
@@ -392,6 +402,7 @@ async def test_probe_best_is_null_for_empty_protocol_buckets(monkeypatch):
     assert out["best_by_protocol"]["openai"] == "gpt-4o"
     assert out["best_by_protocol"]["gemini"] is None
     assert out["best_by_protocol"]["anthropic"] is None
+    assert out["best_by_protocol"]["deepseek"] is None
 
 
 @pytest.mark.asyncio
@@ -416,7 +427,12 @@ async def test_probe_404_response_includes_best_by_protocol_nulls(monkeypatch):
     _patch_async_client(monkeypatch, _mock(lambda req: httpx.Response(404, text="nope")))
     out = await probe_relay("https://relay.example.com", "sk-test")
     assert "best_by_protocol" in out
-    assert out["best_by_protocol"] == {"anthropic": None, "openai": None, "gemini": None}
+    assert out["best_by_protocol"] == {
+        "anthropic": None,
+        "openai": None,
+        "gemini": None,
+        "deepseek": None,
+    }
 
 
 # ---- per-protocol pick_default_model -----------------------------------
@@ -460,6 +476,18 @@ def test_gemini_pick_default_only_previews_available():
         "gemini-3.1-flash-lite-preview",
     ]
     assert pick_default_model(available) == "gemini-3-flash-preview"
+
+
+def test_deepseek_pick_default_prefers_v4_pro():
+    from relay_detector.protocols.deepseek import pick_default_model
+    available = ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert pick_default_model(available) == "deepseek-v4-pro"
+
+
+def test_deepseek_pick_default_strips_models_prefix_when_matching():
+    from relay_detector.protocols.deepseek import pick_default_model
+    available = ["models/deepseek-v4-flash"]
+    assert pick_default_model(available) == "models/deepseek-v4-flash"
 
 
 def test_anthropic_pick_default_prefers_haiku_over_sonnet_over_opus():

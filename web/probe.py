@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 
 
-PROTOCOLS = ("anthropic", "openai", "gemini")
+PROTOCOLS = ("anthropic", "openai", "gemini", "deepseek")
 PROBE_TIMEOUT_S = 4.0
 CACHE_TTL_S = 300.0  # 5 min
 
@@ -45,6 +45,8 @@ def _classify(model_id: str) -> str | None:
         return "anthropic"
     if s.startswith("gemini") or "/gemini" in s:
         return "gemini"
+    if s.startswith("deepseek") or "/deepseek" in s:
+        return "deepseek"
     if (
         s.startswith(("gpt-", "o1", "o3", "o4", "chatgpt", "text-embedding-"))
         or s.startswith(("openai/", "azure/openai"))
@@ -296,6 +298,8 @@ def _preference_list(proto: str) -> tuple[str, ...]:
             from relay_detector.protocols.openai import _PREFERRED_DEFAULTS
         elif proto == "gemini":
             from relay_detector.protocols.gemini import _PREFERRED_DEFAULTS
+        elif proto == "deepseek":
+            from relay_detector.protocols.deepseek import _PREFERRED_DEFAULTS
         else:
             return ()
         return tuple(_PREFERRED_DEFAULTS)
@@ -343,6 +347,8 @@ def _pick_best(proto: str, available: list[str]) -> str | None:
             from relay_detector.protocols.openai import pick_default_model
         elif proto == "gemini":
             from relay_detector.protocols.gemini import pick_default_model
+        elif proto == "deepseek":
+            from relay_detector.protocols.deepseek import pick_default_model
         else:
             return available[0]
         return pick_default_model(available)
@@ -411,6 +417,14 @@ async def probe_model_alive(
                 )
         elif protocol == "gemini":
             from relay_detector.protocols.gemini import make_client
+            async with make_client(base_url, api_key, timeout=PREFLIGHT_TIMEOUT_S) as c:
+                _req, _resp, _h, _lat = await c.chat_completions_create(
+                    model=model,
+                    max_completion_tokens=4,
+                    messages=[{"role": "user", "content": "ok"}],
+                )
+        elif protocol == "deepseek":
+            from relay_detector.protocols.deepseek import make_client
             async with make_client(base_url, api_key, timeout=PREFLIGHT_TIMEOUT_S) as c:
                 _req, _resp, _h, _lat = await c.chat_completions_create(
                     model=model,

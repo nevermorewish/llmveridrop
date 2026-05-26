@@ -70,6 +70,22 @@
       <dt>Token 用量</dt>
       <dd>检查 <code>usageMetadata</code> 是否存在、Token 统计是否自洽,以及长短文本带来的 Token 增量是否合理。</dd>
     </dl>
+    {% elif protocol_path == 'deepseek' %}
+    <summary>DeepSeek 检测项各自检查什么?</summary>
+    <dl class="def-list">
+      <dt>基础请求</dt>
+      <dd>发送最小 Chat Completions 请求,确认接口可用且能提取 assistant 文本。</dd>
+      <dt>模型一致性</dt>
+      <dd>验证响应模型与请求的 <code>deepseek-v4-pro</code> / <code>deepseek-v4-flash</code> 匹配。</dd>
+      <dt>SSE / usage</dt>
+      <dd>开启 <code>stream_options.include_usage</code>,检查流式分片、<code>[DONE]</code>、finish_reason、usage 和缓存 token 字段。</dd>
+      <dt>函数调用</dt>
+      <dd>强制 <code>tool_choice</code>,验证 <code>tool_calls</code> 形状、函数名和 arguments JSON。</dd>
+      <dt>协议规范性</dt>
+      <dd>被动检查 <code>chatcmpl-</code> ID、<code>chat.completion</code>、choices、finish_reason、usage 等 OpenAI 兼容字段。</dd>
+      <dt>长上下文真实性</dt>
+      <dd>需在提交时勾选启用 — 用 needle-in-haystack 探针验证中转站是否真兑现上下文窗口。</dd>
+    </dl>
     {% else %}
     <summary>12 项检测各自检查什么?</summary>
     <dl class="def-list">
